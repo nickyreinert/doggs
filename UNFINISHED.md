@@ -1,0 +1,1 @@
+- 2026-02-16: Scaffold initial FastAPI project; next: implement additional features, CI, and more tests. Blockers: none immediate.
