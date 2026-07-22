@@ -5,10 +5,12 @@ pydantic
 pytest
 python-dotenv
 httpx
-unstructured
+unstructured[all-docs]
 pytesseract
 pdf2image
 Pillow
 python-docx
 python-pptx
-olefile>=0.46
+xxhash
+qdrant-client
+pypdf

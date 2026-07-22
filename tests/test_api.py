@@ -5,8 +5,8 @@ import tempfile
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
 from fastapi.testclient import TestClient
-from app.main import app
-from app.db import init_db
+from backend.main import app
+from backend.database import init_db
 
 client = TestClient(app)
 

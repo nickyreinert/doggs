@@ -1,0 +1,19 @@
+{
+  "scan_settings": {
+    "target_path": "/data/nas",
+    "interval_minutes": 60,
+    "allowed_extensions": [".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls", ".txt", ".md"],
+    "ocr_enabled": true
+  },
+  "llm_settings": {
+    "provider": "ollama",
+    "model": "llama3",
+    "embedding_model": "nomic-embed-text",
+    "api_base": "http://host.docker.internal:11434",
+    "summary_prompt": "Summarize the following document content in 3 concise bullet points. Focus on the core purpose."
+  },
+  "debug": {
+    "store_raw_text_temp": true,
+    "log_level": "INFO"
+  }
+}

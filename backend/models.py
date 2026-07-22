@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, String
-from .db import Base
+from backend.database import Base
 
 
 class Dog(Base):

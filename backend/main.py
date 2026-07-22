@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
-from . import models, schemas
-from .db import SessionLocal, init_db
+from backend import models, schemas
+from backend.database import SessionLocal, init_db
 
 init_db()
 
