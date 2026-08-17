@@ -126,11 +126,14 @@ Restart DOGGS after changing `.env`. Relative local paths are resolved from the 
 | `ERROR_DIR` / `DUPLICATE_DIR` | Files that need attention | `./errors`, `./duplicates` |
 | `HOST` / `PORT` | Web server binding | `0.0.0.0`, `8383` |
 | `POLL_SECONDS` | Inbox rescan interval | `300` |
+| `RECURSIVE_SCAN` | Scan inbox subfolders (`0` or `1`) | `0` |
 | `OCR_LANG` | Tesseract language code | `eng` |
 | `AI_MODE` | `ollama` or `heuristic` | `ollama` |
 | `AI_MODEL` | Local metadata model | `qwen2.5:3b` |
 
 The footer reports Ollama connectivity, selected-model availability, and OCR-language readiness.
+
+By default, DOGGS scans only PDFs placed directly in `INCOMING_DIR`; subfolders are ignored. Set `RECURSIVE_SCAN=1` only when nested inbox folders are intentional.
 
 ## Local AI with Ollama
 

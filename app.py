@@ -38,6 +38,7 @@ ERROR_DIR = configured_path("ERROR_DIR", BASE_DIR / "errors")
 DUPLICATE_DIR = configured_path("DUPLICATE_DIR", BASE_DIR / "duplicates")
 HOST, PORT = os.getenv("HOST", "0.0.0.0"), int(os.getenv("PORT", "8383"))
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "300"))
+RECURSIVE_SCAN = os.getenv("RECURSIVE_SCAN", "0") == "1"
 OCR_LANG, OCR_DPI = os.getenv("OCR_LANG", "eng"), int(os.getenv("OCR_DPI", "200"))
 TOP_REGION_FRACTION, HEAD_PAGES = float(os.getenv("TOP_REGION_FRACTION", "0.25")), int(os.getenv("HEAD_PAGES", "2"))
 OCR_TRIGGER_CHARS, MAX_SOURCE_CHARS = int(os.getenv("OCR_TRIGGER_CHARS", "80")), int(os.getenv("MAX_SOURCE_CHARS", "3000"))
@@ -268,7 +269,8 @@ def scan_incoming():
         return
     try:
         managed_dirs = (ARCHIVE_DIR, ERROR_DIR, DUPLICATE_DIR)
-        candidates = sorted((p for p in INCOMING_DIR.rglob("*") if p.is_file() and p.suffix.lower() == ".pdf" and not any(is_within(directory, p) for directory in managed_dirs)), key=lambda p: p.stat().st_mtime)
+        source_paths = INCOMING_DIR.rglob("*") if RECURSIVE_SCAN else INCOMING_DIR.iterdir()
+        candidates = sorted((p for p in source_paths if p.is_file() and p.suffix.lower() == ".pdf" and not any(is_within(directory, p) for directory in managed_dirs)), key=lambda p: p.stat().st_mtime)
         for path in candidates:
             if not is_stable(path):
                 continue
@@ -358,7 +360,8 @@ def api_status():
         ocr_languages = []
     waiting = []
     if INCOMING_DIR.exists():
-        for path in sorted(INCOMING_DIR.rglob("*.pdf"), key=lambda item: item.stat().st_mtime):
+        source_paths = INCOMING_DIR.rglob("*.pdf") if RECURSIVE_SCAN else INCOMING_DIR.glob("*.pdf")
+        for path in sorted(source_paths, key=lambda item: item.stat().st_mtime):
             waiting.append({"name": path.name, "size": path.stat().st_size, "state": "processing" if path.name == PIPELINE_STATE["processing"] else "waiting"})
     payload = {
         "ollama_enabled": AI_MODE == "ollama",
