@@ -52,6 +52,9 @@ CLASSIFICATION_RULES = [("invoice", ["invoice", "rechnung", "billing", "amount d
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("doggs")
+if CSV_PATH.exists() and CSV_PATH.is_dir():
+    log.warning("CSV_PATH points to a directory; using %s/index.csv", CSV_PATH)
+    CSV_PATH = CSV_PATH / "index.csv"
 app, CSV_LOCK, SCAN_LOCK = Flask(__name__), threading.RLock(), threading.Lock()
 WORKER_STARTED = False
 STATUS_CACHE = {"checked_at": 0.0, "payload": None}
@@ -62,6 +65,10 @@ def ensure_dirs():
     for path in (INCOMING_DIR, ARCHIVE_DIR, DATA_DIR, ERROR_DIR, DUPLICATE_DIR, CSV_PATH.parent): path.mkdir(parents=True, exist_ok=True)
 
 def ensure_csv():
+    global CSV_PATH
+    if CSV_PATH.exists() and CSV_PATH.is_dir():
+        log.warning("CSV_PATH points to a directory; using %s/index.csv", CSV_PATH)
+        CSV_PATH = CSV_PATH / "index.csv"
     if not CSV_PATH.exists():
         with CSV_PATH.open("w", newline="", encoding="utf-8") as f: csv.DictWriter(f, fieldnames=FIELDNAMES).writeheader()
         return
