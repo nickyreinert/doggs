@@ -7,7 +7,7 @@ ARCHIVE_URL="https://github.com/nickyreinert/doggs/archive/refs/heads/main.tar.g
 command -v curl >/dev/null || { echo "[ERROR] curl is required." >&2; exit 1; }
 TMP_DIR="$(mktemp -d)"; trap 'rm -rf "$TMP_DIR"' EXIT
 echo "[UPDATE] Downloading latest DOGGS…"
-curl -fsSL "$ARCHIVE_URL" | tar -xz -C "$TMP_DIR" --strip-components=1
+curl -fsSL "${ARCHIVE_URL}?cache_bust=$(date +%s)" | tar -xz -C "$TMP_DIR" --strip-components=1
 echo "[UPDATE] Applying code update; preserving .env and runtime folders…"
 tar -C "$TMP_DIR" --exclude='.env' --exclude='.venv' --exclude='.git' --exclude='incoming' --exclude='archive' --exclude='data' --exclude='duplicates' --exclude='errors' -cf - . | tar -C "$BASE_DIR" -xf -
 chmod +x "$BASE_DIR/install.sh" "$BASE_DIR/run.sh" "$BASE_DIR/updates.sh"

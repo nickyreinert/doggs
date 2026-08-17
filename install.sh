@@ -50,7 +50,7 @@ if [[ ! -f "$BASE_DIR/app.py" ]]; then
   command -v tar >/dev/null || { error "tar is required for one-line installation."; exit 1; }
   info "Downloading the latest DOGGS release to $TARGET_DIR…"
   mkdir -p "$TARGET_DIR"
-  curl -fsSL "$REPOSITORY_ARCHIVE" | tar -xz -C "$TARGET_DIR" --strip-components=1
+  curl -fsSL "${REPOSITORY_ARCHIVE}?cache_bust=$(date +%s)" | tar -xz -C "$TARGET_DIR" --strip-components=1
   exec "$TARGET_DIR/install.sh" "$@"
 fi
 for arg in "$@"; do case "$arg" in --system) SYSTEM=true;; --local) SYSTEM=false;; -h|--help) usage; exit 0;; *) usage; exit 2;; esac; done

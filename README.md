@@ -31,13 +31,13 @@ It asks for storage folders, local versus systemd installation, OCR language, an
 This downloads the latest release into `./doggs` and starts the same interactive installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nickyreinert/doggs/main/install.sh | bash
+curl -fsSL "https://raw.githubusercontent.com/nickyreinert/doggs/main/install.sh?cache_bust=$(date +%s)" | bash
 ```
 
 Set `DOGGS_INSTALL_DIR` to choose a different destination:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nickyreinert/doggs/main/install.sh | DOGGS_INSTALL_DIR="$HOME/Applications/doggs" bash
+curl -fsSL "https://raw.githubusercontent.com/nickyreinert/doggs/main/install.sh?cache_bust=$(date +%s)" | DOGGS_INSTALL_DIR="$HOME/Applications/doggs" bash
 ```
 
 For a local installation, start DOGGS with:
