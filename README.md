@@ -1,45 +1,153 @@
 # DOGGS
 
-A small self-hosted PDF inbox for Ubuntu and NAS systems. It extracts the header text of incoming PDFs, uses OCR only when needed, indexes each document in a CSV file, and serves a searchable PDF preview UI.
+DOGGS is a small, self-hosted PDF inbox and archive for a Mac, Ubuntu server, or NAS. Drop PDFs into an incoming folder and DOGGS extracts header text, optionally uses local OCR and local AI, stores the document in a dated archive, and keeps a plain CSV index.
+
+It has no cloud account, no database server, and no mandatory AI dependency.
+
+## What it does
+
+- Watches an inbox for new PDF files every five minutes, and scans once immediately at startup.
+- Extracts embedded text from the top of the first two pages.
+- Uses Tesseract OCR for scanned PDFs with little embedded text.
+- Optionally asks a local Ollama model for date, classification, filename slug, and summary.
+- Falls back to deterministic rules when Ollama is unavailable.
+- Stores PDFs under `archive/YYYY/YYYY-MM-DD_slug.pdf` and detects duplicates by SHA-256.
+- Keeps searchable metadata in `data/index.csv`.
+- Provides search, PDF preview, live Ollama/OCR status, and an expandable processing pipeline.
 
 ## Quick start
+
+Clone the repository and run the interactive installer:
 
 ```bash
 chmod +x install.sh run.sh
 ./install.sh
+```
+
+It asks for storage folders, local versus systemd installation, OCR language, and local Ollama preferences. Nothing is installed until the final confirmation.
+
+For a local installation, start DOGGS with:
+
+```bash
 ./run.sh
 ```
 
-Drop PDFs in `incoming/`, then open `http://localhost:8383`. The scanner runs immediately on startup and then every five minutes. Files end up under `archive/YYYY/`; duplicates and failures are retained in `duplicates/` and `errors/`.
+Open [http://localhost:8383](http://localhost:8383), drop PDFs into the configured incoming folder, and use the expandable **Pipeline** footer to inspect waiting files or trigger a manual scan.
+
+## Document flow
+
+```text
+incoming/ ──→ text extraction / OCR / metadata ──→ archive/YYYY/
+                 │                    │
+                 │                    └── data/index.csv
+                 ├── duplicate hash ─────→ duplicates/
+                 └── processing failure ─→ errors/
+```
+
+PDFs are moved, not copied, after processing. Keep a source-scanner folder separate if it needs its own retention policy.
+
+## Installation
+
+### macOS
+
+The installer creates `.venv`. When OCR is needed, it detects Homebrew and installs the Tesseract engine plus language data automatically after confirmation:
+
+```bash
+brew install tesseract tesseract-lang
+```
+
+For German, enter `deu` for **Tesseract OCR language**. The installer verifies it before continuing.
+
+### Ubuntu, Debian, and NAS systems
+
+Run the same installer and answer `y` to **Install as a systemd service**:
+
+```bash
+./install.sh
+```
+
+It installs Python, Tesseract, and the selected language package (for example `tesseract-ocr-deu`), installs the app under `/opt/doggs`, and starts `doggs.service`.
+
+```bash
+sudo systemctl status doggs
+sudo systemctl restart doggs
+sudo journalctl -u doggs -f
+```
 
 ## Configuration
 
-Copy `.env.example` to `.env` and adjust any paths or settings. The `.env` file is loaded automatically; environment variables supplied by the shell or systemd take precedence. For a system install, use absolute paths, for example:
+The installer creates `.env`, which is not committed to Git. You can create it manually too:
 
-```dotenv
-INCOMING_DIR=/mnt/nas/scans/incoming
-ARCHIVE_DIR=/mnt/nas/documents/archive
-DATA_DIR=/opt/doggs/data
-OCR_LANG=deu
-AI_MODEL=qwen2.5:3b
+```bash
+cp .env.example .env
 ```
 
-The included systemd unit reads `/opt/doggs/.env` too. After updating it, run `sudo systemctl restart doggs`.
+Restart DOGGS after changing `.env`. Relative local paths are resolved from the app directory; use absolute paths for systemd and NAS mounts.
 
-## Local AI
+| Setting | Purpose | Default |
+| --- | --- | --- |
+| `INCOMING_DIR` | Folder scanned for PDFs | `./incoming` |
+| `ARCHIVE_DIR` | Destination archive root | `./archive` |
+| `DATA_DIR` / `CSV_PATH` | CSV metadata storage | `./data` |
+| `ERROR_DIR` / `DUPLICATE_DIR` | Files that need attention | `./errors`, `./duplicates` |
+| `HOST` / `PORT` | Web server binding | `0.0.0.0`, `8383` |
+| `POLL_SECONDS` | Inbox rescan interval | `300` |
+| `OCR_LANG` | Tesseract language code | `eng` |
+| `AI_MODE` | `ollama` or `heuristic` | `ollama` |
+| `AI_MODEL` | Local metadata model | `qwen2.5:3b` |
 
-The default model is `qwen2.5:3b`, requested for reliable small-model JSON metadata extraction. The app remains usable when Ollama is off-line: it automatically falls back to deterministic date and classification heuristics.
+The footer reports Ollama connectivity, selected-model availability, and OCR-language readiness.
+
+## Local AI with Ollama
+
+DOGGS defaults to `qwen2.5:3b`, a small model for local metadata extraction. Ollama is optional: documents still archive using deterministic heuristics when it is unavailable.
+
+Install Ollama from [ollama.com](https://ollama.com/download), then pull the model:
 
 ```bash
 ollama pull qwen2.5:3b
 ```
 
-Set `AI_MODE=heuristic` to disable model calls entirely. Set `AI_MODEL`, `OLLAMA_URL`, and `AI_TIMEOUT` to suit your installation.
+To disable local-model calls altogether:
 
-## Ubuntu system service
+```dotenv
+AI_MODE=heuristic
+```
 
-Run `./install.sh` from a complete checkout. Before it installs anything, it asks where documents should live, whether it should set up a systemd service, OCR language, and whether to use Ollama. If Ollama is not installed, it shows the official installation link and exact `ollama pull` command—nothing is downloaded from Ollama automatically.
+## Web UI and pipeline
 
-The installer verifies the selected Tesseract language and installs it automatically: Ubuntu/Debian uses `tesseract-ocr-<language>` (for example `tesseract-ocr-deu`); macOS with Homebrew installs `tesseract` and `tesseract-lang`.
+The top bar offers a year filter, multi-select slug-token filters (AND logic), and quick search across filename, date, classification, summary, and tokens. The sidebar groups documents by year; selecting a document opens its PDF preview.
 
-The built-in web server has no authentication. Keep it on a trusted LAN, bind `HOST=127.0.0.1`, or put it behind authenticated reverse-proxy/Tailscale access.
+The footer shows live Ollama/model state. Open **Pipeline** to see waiting/processing PDFs, OCR readiness, the most recent processing error, and **Scan now** for an immediate scan.
+
+## Troubleshooting
+
+### PDFs remain in the inbox
+
+Open **Pipeline** and choose **Scan now**. Failed PDFs move to `errors/`; duplicate hashes move to `duplicates/`.
+
+### `OCR deu: missing`
+
+Re-run `./install.sh` and keep `deu` selected. macOS installs `tesseract-lang`; Ubuntu/Debian installs `tesseract-ocr-deu`. Restart DOGGS afterwards.
+
+### Ollama or the model is unavailable
+
+Processing continues with heuristics. Start Ollama and run `ollama pull qwen2.5:3b` to enable AI metadata later.
+
+### System service cannot start
+
+```bash
+sudo journalctl -u doggs -n 100 --no-pager
+```
+
+Confirm paths in `/opt/doggs/.env` exist and the `doggs` account can read/write them, especially NAS mounts.
+
+## Data and privacy
+
+All processing occurs locally. When enabled, the only AI request goes to the configured local Ollama URL. DOGGS provides no authentication, so do not expose its built-in server directly to the public internet. Bind to `127.0.0.1`, restrict access to a trusted LAN/VPN, or use an authenticated reverse proxy.
+
+Runtime content is excluded from Git:
+
+```text
+incoming/  archive/  data/  duplicates/  errors/  .env  .venv/
+```

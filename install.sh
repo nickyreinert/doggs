@@ -81,8 +81,8 @@ if [[ "$SYSTEM" == true ]]; then
   heading "Installing system service"
   sudo apt-get update; sudo apt-get install -y python3 python3-venv python3-pip
   ensure_ocr_language "$OCR_LANG"
-  sudo useradd -r -s /usr/sbin/nologin paperless 2>/dev/null || true; sudo mkdir -p "$APP_DIR"; sudo cp -a "$BASE_DIR/." "$APP_DIR/"; sudo chown -R paperless:paperless "$APP_DIR"
-  sudo -u paperless python3 -m venv "$APP_DIR/.venv"; sudo -u paperless "$APP_DIR/.venv/bin/pip" install -U pip; sudo -u paperless "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
+  sudo useradd -r -s /usr/sbin/nologin doggs 2>/dev/null || true; sudo mkdir -p "$APP_DIR"; sudo cp -a "$BASE_DIR/." "$APP_DIR/"; sudo chown -R doggs:doggs "$APP_DIR"
+  sudo -u doggs python3 -m venv "$APP_DIR/.venv"; sudo -u doggs "$APP_DIR/.venv/bin/pip" install -U pip; sudo -u doggs "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
   sudo cp "$APP_DIR/doggs.service" /etc/systemd/system/doggs.service; sudo systemctl daemon-reload; sudo systemctl enable --now doggs; success "Installed. Open http://${HOST:-0.0.0.0}:${PORT:-8383}"
 else
   command -v python3 >/dev/null || { error "python3 is required."; exit 1; }; heading "Installing local application"; python3 -m venv "$APP_DIR/.venv"; "$APP_DIR/.venv/bin/pip" install -U pip; "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
