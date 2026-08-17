@@ -41,12 +41,12 @@ POLL_SECONDS = int(os.getenv("POLL_SECONDS", "300"))
 OCR_LANG, OCR_DPI = os.getenv("OCR_LANG", "eng"), int(os.getenv("OCR_DPI", "200"))
 TOP_REGION_FRACTION, HEAD_PAGES = float(os.getenv("TOP_REGION_FRACTION", "0.25")), int(os.getenv("HEAD_PAGES", "2"))
 OCR_TRIGGER_CHARS, MAX_SOURCE_CHARS = int(os.getenv("OCR_TRIGGER_CHARS", "80")), int(os.getenv("MAX_SOURCE_CHARS", "3000"))
-MAX_TEXT_CHARS, AI_TIMEOUT = int(os.getenv("MAX_TEXT_CHARS", "300")), int(os.getenv("AI_TIMEOUT", "60"))
+MAX_TEXT_CHARS, MAX_FULL_TEXT_CHARS, AI_TIMEOUT = int(os.getenv("MAX_TEXT_CHARS", "300")), int(os.getenv("MAX_FULL_TEXT_CHARS", "12000")), int(os.getenv("AI_TIMEOUT", "60"))
 AI_MODE, OLLAMA_URL = os.getenv("AI_MODE", "ollama"), os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:3b")
 DATE_DAYFIRST = os.getenv("DATE_DAYFIRST", "1") == "1"
 MAX_TOKEN_FACETS = int(os.getenv("MAX_TOKEN_FACETS", "80"))
-FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "date", "year", "slug", "classification", "summary", "tokens", "source", "created_at"]
+FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "summary", "tokens", "tags", "is_duplicate", "duplicate_of", "source", "created_at"]
 STOP_TOKENS = {"the", "and", "for", "doc", "document", "pdf", "misc", "unknown"}
 CLASSIFICATION_RULES = [("invoice", ["invoice", "rechnung", "billing", "amount due", "zahlung"]), ("bank", ["bank statement", "kontoauszug", "iban", "balance", "transaction"]), ("insurance", ["insurance", "versicherung", "policy", "claim", "premium"]), ("contract", ["contract", "agreement", "vertrag", "terms"]), ("tax", ["tax", "steuer", "finanzamt", "vat"]), ("medical", ["medical", "arzt", "doctor", "patient"]), ("utility", ["electricity", "gas", "water", "internet", "phone"]), ("salary", ["salary", "payroll", "gehalt", "lohn"]), ("official", ["authority", "bescheid", "government", "court"]), ("receipt", ["receipt", "quittung", "purchase"])]
 
@@ -56,6 +56,7 @@ app, CSV_LOCK, SCAN_LOCK = Flask(__name__), threading.RLock(), threading.Lock()
 WORKER_STARTED = False
 STATUS_CACHE = {"checked_at": 0.0, "payload": None}
 PIPELINE_STATE = {"processing": "", "last_scan": "", "last_error": "", "processed": 0}
+FULL_SCAN_STATE = {}
 
 def ensure_dirs():
     for path in (INCOMING_DIR, ARCHIVE_DIR, DATA_DIR, ERROR_DIR, DUPLICATE_DIR, CSV_PATH.parent): path.mkdir(parents=True, exist_ok=True)
@@ -63,11 +64,19 @@ def ensure_dirs():
 def ensure_csv():
     if not CSV_PATH.exists():
         with CSV_PATH.open("w", newline="", encoding="utf-8") as f: csv.DictWriter(f, fieldnames=FIELDNAMES).writeheader()
+        return
+    with CSV_PATH.open(newline="", encoding="utf-8") as f:
+        existing = list(csv.DictReader(f)); existing_fields = f.seek(0) or next(csv.reader(f), [])
+    if existing_fields != FIELDNAMES:
+        with CSV_PATH.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore")
+            writer.writeheader(); writer.writerows(existing)
 
 def read_rows():
     with CSV_LOCK:
         ensure_dirs(); ensure_csv()
-        with CSV_PATH.open(newline="", encoding="utf-8") as f: return list(csv.DictReader(f))
+        with CSV_PATH.open(newline="", encoding="utf-8") as f:
+            return [{field: row.get(field, "") for field in FIELDNAMES} for row in csv.DictReader(f)]
 
 def write_rows(rows):
     with CSV_LOCK:
@@ -86,6 +95,8 @@ def slugify(value):
     return re.sub(r"-{2,}", "-", value).strip("-")[:60].strip("-") or "document"
 
 def slug_tokens(slug): return [p for p in re.split(r"[-_ ]+", (slug or "").lower()) if p and p not in STOP_TOKENS]
+def custom_tags(row): return [slugify(tag) for tag in re.split(r"[\s,]+", row.get("tags", "")) if tag.strip()]
+def row_tags(row): return set(slug_tokens(row.get("slug", "")) + custom_tags(row))
 
 def unique_path(path):
     if not path.exists(): return path
@@ -176,9 +187,53 @@ def ai_extract(text):
     except Exception:
         log.warning("Ollama extraction failed; using deterministic heuristics."); return {}
 
+def ai_summary(text):
+    if AI_MODE != "ollama" or not text.strip(): return ""
+    payload = {"model": AI_MODEL, "stream": False, "options": {"temperature": 0, "num_predict": 260}, "messages": [{"role": "system", "content": "Summarize documents accurately in one concise paragraph. Return only the summary."}, {"role": "user", "content": re.sub(r"\s+", " ", text)[:MAX_FULL_TEXT_CHARS]}]}
+    try:
+        response = requests.post(f"{OLLAMA_URL.rstrip('/')}/api/chat", json=payload, timeout=max(AI_TIMEOUT, 180)); response.raise_for_status()
+        return response.json().get("message", {}).get("content", "").strip()[:1000]
+    except requests.RequestException:
+        log.warning("Ollama full-document summary failed."); return ""
+
+def full_ocr_text(path):
+    parts = []
+    with fitz.open(path) as doc:
+        for index in range(len(doc)):
+            page = doc.load_page(index); zoom = max(1, OCR_DPI / 72); pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+            image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            parts.append(pytesseract.image_to_string(image, lang=OCR_LANG))
+    return re.sub(r"\s+", " ", "\n".join(parts)).strip()[:MAX_FULL_TEXT_CHARS]
+
+def file_path_for_row(row):
+    base = DUPLICATE_DIR if row.get("location") == "duplicates" else ARCHIVE_DIR
+    return (base / row.get("stored_path", "")).resolve()
+
+def run_full_scan(row_id):
+    FULL_SCAN_STATE[row_id] = {"state": "running", "error": ""}
+    try:
+        rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
+        if not row: raise ValueError("Document no longer exists in the index.")
+        text = full_ocr_text(file_path_for_row(row))
+        if not text: raise ValueError("OCR returned no text. Check the configured OCR language.")
+        summary = ai_summary(text) or re.sub(r"\s+", " ", text)[:1000]
+        rows = read_rows()
+        for item in rows:
+            if item.get("id") == row_id:
+                item["summary"] = summary; item["source"] = "full-ocr"; break
+        write_rows(rows)
+        FULL_SCAN_STATE[row_id] = {"state": "complete", "error": ""}
+    except Exception as exc:
+        log.exception("Full scan failed for %s", row_id)
+        FULL_SCAN_STATE[row_id] = {"state": "error", "error": str(exc)}
+
 def process_file(path):
     file_hash, rows = sha256_file(path), read_rows()
-    if any(row.get("file_hash") == file_hash for row in rows): move_to_side_dir(path, DUPLICATE_DIR); return
+    original = next((row for row in rows if row.get("file_hash") == file_hash and row.get("location") != "duplicates"), None)
+    if original:
+        destination = unique_path(DUPLICATE_DIR / path.name); shutil.move(str(path), destination)
+        rows.append({**original, "id": f"{file_hash[:12]}-{int(time.time() * 1000)}", "original_name": path.name, "stored_path": destination.relative_to(DUPLICATE_DIR).as_posix(), "location": "duplicates", "is_duplicate": "1", "duplicate_of": original.get("id", ""), "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z"})
+        write_rows(rows); log.info("Stored duplicate %s", destination); return
     try:
         with fitz.open(path) as doc: pdf_date = parse_pdf_date(doc)
         text, source = extract_visible_text(path)
@@ -189,7 +244,7 @@ def process_file(path):
     slug = slugify(ai.get("slug") or heuristics["slug"] or classification)
     destination = unique_path(ARCHIVE_DIR / str(final_date.year) / f"{final_date.isoformat()}_{slug}.pdf"); destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(path), destination)
-    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "summary": (ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(slug_tokens(slug)), "source": source, "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z"})
+    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "summary": (ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(slug_tokens(slug)), "tags": "", "is_duplicate": "", "duplicate_of": "", "source": source, "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z"})
     write_rows(rows); log.info("Archived %s", destination)
 
 def scan_incoming():
@@ -234,13 +289,31 @@ def index(): return render_template("index.html")
 
 @app.route("/api/index")
 def api_index():
-    query = request.args.get("q", "").strip(); years = set(filter(None, request.args.get("years", "").split(","))); tokens = set(filter(None, request.args.get("tokens", "").split(","))); rows = read_rows()
-    searched = search_rows(rows, query); files = [row for row in searched if (not years or row.get("year") in years) and (not tokens or tokens.issubset(set(slug_tokens(row.get("slug", "")))))]
-    year_rows = [row for row in searched if not tokens or tokens.issubset(set(slug_tokens(row.get("slug", ""))))]
+    query = request.args.get("q", "").strip(); years = set(filter(None, request.args.get("years", "").split(","))); tokens = set(filter(None, request.args.get("tokens", "").split(","))); duplicates = request.args.get("duplicates") == "1"; rows = read_rows()
+    duplicate_hashes = {value for value, count in Counter(row.get("file_hash") for row in rows if row.get("file_hash")).items() if count > 1}
+    searched = search_rows(rows, query); files = [row for row in searched if (not years or row.get("year") in years) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
+    year_rows = [row for row in searched if (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
     token_rows = [row for row in searched if not years or row.get("year") in years]
-    counts = Counter(token for row in token_rows for token in slug_tokens(row.get("slug", "")))
+    counts = Counter(token for row in token_rows for token in row_tags(row))
     files.sort(key=lambda row: (row.get("date", ""), row.get("stored_path", "")), reverse=True)
-    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tokens": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "files": [{**row, "name": Path(row.get("stored_path", "")).name, "url": f"/file?path={quote(row.get('stored_path', ''))}"} for row in files]})
+    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [{**row, "name": Path(row.get("stored_path", "")).name, "url": f"/file?id={quote(row.get('id', ''))}", "full_scan": FULL_SCAN_STATE.get(row.get("id"), {})} for row in files]})
+
+@app.post("/api/file/<row_id>")
+def update_file(row_id):
+    payload = request.get_json(silent=True) or {}; rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
+    if not row: abort(404)
+    if "tags" in payload:
+        row["tags"] = " ".join(dict.fromkeys(slugify(tag) for tag in re.split(r"[\s,]+", str(payload["tags"])) if tag and slugify(tag) != "document"))
+    if "summary" in payload: row["summary"] = str(payload["summary"]).strip()[:4000]
+    write_rows(rows)
+    return jsonify({"ok": True, "tags": row["tags"], "summary": row["summary"]})
+
+@app.post("/api/file/<row_id>/full-scan")
+def full_scan_file(row_id):
+    if FULL_SCAN_STATE.get(row_id, {}).get("state") == "running": return jsonify({"started": False, "message": "Full scan already running."}), 409
+    if not any(row.get("id") == row_id for row in read_rows()): abort(404)
+    threading.Thread(target=run_full_scan, args=(row_id,), daemon=True).start()
+    return jsonify({"started": True})
 
 @app.route("/api/status")
 def api_status():
@@ -294,8 +367,10 @@ def api_scan():
 
 @app.route("/file")
 def serve_file():
-    full_path = (ARCHIVE_DIR / request.args.get("path", "").lstrip("/")).resolve()
-    if not is_within(ARCHIVE_DIR, full_path): abort(403)
+    row = next((item for item in read_rows() if item.get("id") == request.args.get("id", "")), None)
+    if not row: abort(404)
+    full_path = file_path_for_row(row); base = DUPLICATE_DIR if row.get("location") == "duplicates" else ARCHIVE_DIR
+    if not is_within(base, full_path): abort(403)
     if not full_path.is_file(): abort(404)
     return send_file(full_path, mimetype="application/pdf")
 
