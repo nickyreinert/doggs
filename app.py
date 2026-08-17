@@ -10,7 +10,7 @@ import shutil
 import threading
 import time
 from collections import Counter
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -244,7 +244,7 @@ def process_file(path):
     original = next((row for row in rows if row.get("file_hash") == file_hash and row.get("location") != "duplicates"), None)
     if original:
         destination = unique_path(DUPLICATE_DIR / path.name); shutil.move(str(path), destination)
-        rows.append({**original, "id": f"{file_hash[:12]}-{int(time.time() * 1000)}", "original_name": path.name, "stored_path": destination.relative_to(DUPLICATE_DIR).as_posix(), "location": "duplicates", "is_duplicate": "1", "duplicate_of": original.get("id", ""), "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z"})
+        rows.append({**original, "id": f"{file_hash[:12]}-{int(time.time() * 1000)}", "original_name": path.name, "stored_path": destination.relative_to(DUPLICATE_DIR).as_posix(), "location": "duplicates", "is_duplicate": "1", "duplicate_of": original.get("id", ""), "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
         write_rows(rows); log.info("Stored duplicate %s", destination); return
     try:
         with fitz.open(path) as doc:
@@ -260,14 +260,15 @@ def process_file(path):
     slug = slugify(ai.get("slug") or heuristics["slug"] or classification)
     destination = unique_path(ARCHIVE_DIR / str(final_date.year) / f"{final_date.isoformat()}_{slug}.pdf"); destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(path), destination)
-    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "summary": (ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(slug_tokens(slug)), "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z"})
+    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "summary": (ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(slug_tokens(slug)), "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
     write_rows(rows); log.info("Archived %s", destination)
 
 def scan_incoming():
     if not SCAN_LOCK.acquire(blocking=False):
         return
     try:
-        candidates = sorted((p for p in INCOMING_DIR.rglob("*") if p.is_file() and p.suffix.lower() == ".pdf"), key=lambda p: p.stat().st_mtime)
+        managed_dirs = (ARCHIVE_DIR, ERROR_DIR, DUPLICATE_DIR)
+        candidates = sorted((p for p in INCOMING_DIR.rglob("*") if p.is_file() and p.suffix.lower() == ".pdf" and not any(is_within(directory, p) for directory in managed_dirs)), key=lambda p: p.stat().st_mtime)
         for path in candidates:
             if not is_stable(path):
                 continue
