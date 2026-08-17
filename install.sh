@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # Interactive DOGGS installer. Nothing is installed until the final confirmation.
 set -euo pipefail
-BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PATH="${BASH_SOURCE[0]-$0}"
+BASE_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 SYSTEM=""; PULL_MODEL=false
 REPOSITORY_ARCHIVE="https://github.com/nickyreinert/doggs/archive/refs/heads/main.tar.gz"
 if [[ -t 1 ]]; then RESET=$'\033[0m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; BLUE=$'\033[34m'; CYAN=$'\033[36m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; else RESET= BOLD= DIM= BLUE= CYAN= GREEN= YELLOW= RED=; fi
-heading() { printf '\n%s%s%s\n' "$BOLD$BLUE" "$1" "$RESET"; printf '%*s\n' "${#1}" '' | tr ' ' '─'; }
+heading() { printf '\n%s%s%s\n' "$BOLD$BLUE" "$1" "$RESET"; printf '%*s\n' "${#1}" '' | tr ' ' '='; }
 info() { printf '%s[INFO]%s %s\n' "$CYAN" "$RESET" "$1"; }
 detail() { printf '%s[DETAIL]%s %s\n' "$DIM" "$RESET" "$1"; }
 success() { printf '%s[OK]%s %s\n' "$GREEN" "$RESET" "$1"; }
 warning() { printf '%s[NOTE]%s %s\n' "$YELLOW" "$RESET" "$1" >&2; }
 error() { printf '%s[ERROR]%s %s\n' "$RED" "$RESET" "$1" >&2; }
 usage() { printf '%sUsage:%s %s [--system|--local]\n' "$BOLD" "$RESET" "$0"; }
-ask() { local reply; printf '%s[?]%s %s %s(default: %s)%s ' "$BOLD$CYAN" "$RESET" "$1" "$DIM" "$2" "$RESET" >&2; read -r reply || reply=""; printf '%s' "${reply:-$2}"; }
-yes_no() { local reply; printf '%s[?]%s %s %s(default: %s)%s ' "$BOLD$CYAN" "$RESET" "$1" "$DIM" "$2" "$RESET" >&2; read -r reply || reply=""; reply="${reply:-$2}"; [[ "$reply" =~ ^[Yy]([Ee][Ss])?$ ]]; }
+ask() { local reply; printf '%s[?]%s %s %s(default: %s)%s ' "$BOLD$CYAN" "$RESET" "$1" "$DIM" "$2" "$RESET" >&2; if [[ -r /dev/tty ]]; then read -r reply </dev/tty || reply=""; else read -r reply || reply=""; fi; printf '%s' "${reply:-$2}"; }
+yes_no() { local reply; printf '%s[?]%s %s %s(default: %s)%s ' "$BOLD$CYAN" "$RESET" "$1" "$DIM" "$2" "$RESET" >&2; if [[ -r /dev/tty ]]; then read -r reply </dev/tty || reply=""; else read -r reply || reply=""; fi; reply="${reply:-$2}"; [[ "$reply" =~ ^[Yy]([Ee][Ss])?$ ]]; }
 load_env() {
   local key value
   while IFS='=' read -r key value; do
