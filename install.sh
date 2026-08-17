@@ -91,10 +91,17 @@ if [[ "$SYSTEM" == true ]]; then detail "Target: /opt/doggs + doggs.service"; el
 detail "Configuration: $BASE_DIR/.env"
 if ! yes_no "Continue with installation?" "n"; then warning "Cancelled. Your .env configuration was saved."; exit 0; fi
 
+command -v git >/dev/null || { error "Git is required for installation."; exit 1; }
+git -C "$BASE_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { error "DOGGS must be installed from a Git checkout. Use the one-line installer or clone the repository first."; exit 1; }
+info "Checking out the latest origin/main…"
+git -C "$BASE_DIR" fetch origin main
+git -C "$BASE_DIR" checkout main
+git -C "$BASE_DIR" reset --hard origin/main
+
 if [[ "$SYSTEM" == true ]]; then
   command -v sudo >/dev/null || { error "sudo is required for system installation."; exit 1; }
   heading "Installing system service"
-  sudo apt-get update; sudo apt-get install -y python3 python3-venv python3-pip
+  sudo apt-get update; sudo apt-get install -y git python3 python3-venv python3-pip
   ensure_ocr_language "$OCR_LANG"
   sudo useradd -r -s /usr/sbin/nologin doggs 2>/dev/null || true; sudo mkdir -p "$APP_DIR"; sudo cp -a "$BASE_DIR/." "$APP_DIR/"; sudo chown -R doggs:doggs "$APP_DIR"
   sudo -u doggs python3 -m venv "$APP_DIR/.venv"; sudo -u doggs "$APP_DIR/.venv/bin/pip" install -U pip; sudo -u doggs "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"

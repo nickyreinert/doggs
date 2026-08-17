@@ -56,7 +56,7 @@ From the installed DOGGS folder, run:
 ./update.sh
 ```
 
-It fetches and checks out the latest `origin/main` commit. It does not download archives or alter configuration/data folders.
+It stops `doggs.service` when active, fetches and checks out the latest `origin/main` commit, refreshes dependencies, and starts the service again. It does not download archives or alter configuration/data folders.
 
 To update with a one-liner from inside the installed DOGGS folder, use the update wrapper rather than the installer:
 
