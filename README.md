@@ -26,6 +26,20 @@ chmod +x install.sh run.sh
 
 It asks for storage folders, local versus systemd installation, OCR language, and local Ollama preferences. Nothing is installed until the final confirmation.
 
+### One-line installation
+
+This downloads the latest release into `./doggs` and starts the same interactive installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nickyreinert/doggs/main/install.sh | bash
+```
+
+Set `DOGGS_INSTALL_DIR` to choose a different destination:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nickyreinert/doggs/main/install.sh | DOGGS_INSTALL_DIR="$HOME/Applications/doggs" bash
+```
+
 For a local installation, start DOGGS with:
 
 ```bash
@@ -33,6 +47,16 @@ For a local installation, start DOGGS with:
 ```
 
 Open [http://localhost:8383](http://localhost:8383), drop PDFs into the configured incoming folder, and use the expandable **Pipeline** footer to inspect waiting files or trigger a manual scan.
+
+### Updating
+
+From the installed DOGGS folder, run:
+
+```bash
+./updates.sh
+```
+
+It downloads the latest code, refreshes Python dependencies, preserves `.env` and all document/index folders, and restarts `doggs.service` for `/opt/doggs` installations.
 
 ## Document flow
 

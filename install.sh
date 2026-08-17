@@ -3,6 +3,7 @@
 set -euo pipefail
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SYSTEM=""; PULL_MODEL=false
+REPOSITORY_ARCHIVE="https://github.com/nickyreinert/doggs/archive/refs/heads/main.tar.gz"
 if [[ -t 1 ]]; then RESET=$'\033[0m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; BLUE=$'\033[34m'; CYAN=$'\033[36m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; else RESET= BOLD= DIM= BLUE= CYAN= GREEN= YELLOW= RED=; fi
 heading() { printf '\n%s%s%s\n' "$BOLD$BLUE" "$1" "$RESET"; printf '%*s\n' "${#1}" '' | tr ' ' '─'; }
 info() { printf '%s[INFO]%s %s\n' "$CYAN" "$RESET" "$1"; }
@@ -41,6 +42,16 @@ ensure_ocr_language() {
   fi
   ocr_language_installed "$language" || { error "Tesseract language '$language' could not be verified after installation."; exit 1; }
 }
+if [[ ! -f "$BASE_DIR/app.py" ]]; then
+  heading "DOGGS bootstrap"
+  TARGET_DIR="${DOGGS_INSTALL_DIR:-$PWD/doggs}"
+  command -v curl >/dev/null || { error "curl is required for one-line installation."; exit 1; }
+  command -v tar >/dev/null || { error "tar is required for one-line installation."; exit 1; }
+  info "Downloading the latest DOGGS release to $TARGET_DIR…"
+  mkdir -p "$TARGET_DIR"
+  curl -fsSL "$REPOSITORY_ARCHIVE" | tar -xz -C "$TARGET_DIR" --strip-components=1
+  exec "$TARGET_DIR/install.sh" "$@"
+fi
 for arg in "$@"; do case "$arg" in --system) SYSTEM=true;; --local) SYSTEM=false;; -h|--help) usage; exit 0;; *) usage; exit 2;; esac; done
 
 heading "DOGGS setup"
