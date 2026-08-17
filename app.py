@@ -46,7 +46,7 @@ AI_MODE, OLLAMA_URL = os.getenv("AI_MODE", "ollama"), os.getenv("OLLAMA_URL", "h
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:3b")
 DATE_DAYFIRST = os.getenv("DATE_DAYFIRST", "1") == "1"
 MAX_TOKEN_FACETS = int(os.getenv("MAX_TOKEN_FACETS", "80"))
-FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "summary", "tokens", "tags", "is_duplicate", "duplicate_of", "source", "created_at"]
+FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "summary", "tokens", "tags", "is_duplicate", "duplicate_of", "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer", "source", "created_at"]
 STOP_TOKENS = {"the", "and", "for", "doc", "document", "pdf", "misc", "unknown"}
 CLASSIFICATION_RULES = [("invoice", ["invoice", "rechnung", "billing", "amount due", "zahlung"]), ("bank", ["bank statement", "kontoauszug", "iban", "balance", "transaction"]), ("insurance", ["insurance", "versicherung", "policy", "claim", "premium"]), ("contract", ["contract", "agreement", "vertrag", "terms"]), ("tax", ["tax", "steuer", "finanzamt", "vat"]), ("medical", ["medical", "arzt", "doctor", "patient"]), ("utility", ["electricity", "gas", "water", "internet", "phone"]), ("salary", ["salary", "payroll", "gehalt", "lohn"]), ("official", ["authority", "bescheid", "government", "court"]), ("receipt", ["receipt", "quittung", "purchase"])]
 
@@ -136,6 +136,11 @@ def parse_pdf_date(doc):
             parsed = valid_date(*match.groups())
             if parsed: return parsed
     return None
+
+def extract_pdf_metadata(doc):
+    metadata = doc.metadata or {}
+    names = {"pdf_title": "title", "pdf_author": "author", "pdf_subject": "subject", "pdf_keywords": "keywords", "pdf_creator": "creator", "pdf_producer": "producer"}
+    return {field: re.sub(r"\s+", " ", str(metadata.get(name) or "")).strip()[:500] for field, name in names.items()}
 
 def ocr_top_region(path, doc=None):
     own_doc = doc is None
@@ -235,16 +240,20 @@ def process_file(path):
         rows.append({**original, "id": f"{file_hash[:12]}-{int(time.time() * 1000)}", "original_name": path.name, "stored_path": destination.relative_to(DUPLICATE_DIR).as_posix(), "location": "duplicates", "is_duplicate": "1", "duplicate_of": original.get("id", ""), "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z"})
         write_rows(rows); log.info("Stored duplicate %s", destination); return
     try:
-        with fitz.open(path) as doc: pdf_date = parse_pdf_date(doc)
+        with fitz.open(path) as doc:
+            pdf_date = parse_pdf_date(doc)
+            pdf_metadata = extract_pdf_metadata(doc)
         text, source = extract_visible_text(path)
     except Exception: raise
-    heuristics, ai = heuristic_extract(text, path.name), ai_extract(text)
-    final_date = parse_any_date(ai.get("date")) or parse_text_date(text) or pdf_date or datetime.fromtimestamp(path.stat().st_mtime).date()
+    metadata_text = " ".join(value for value in pdf_metadata.values() if value)
+    analysis_text = f"{metadata_text} {text}".strip()
+    heuristics, ai = heuristic_extract(analysis_text, path.name), ai_extract(analysis_text)
+    final_date = parse_any_date(ai.get("date")) or parse_text_date(analysis_text) or pdf_date or datetime.fromtimestamp(path.stat().st_mtime).date()
     classification = slugify(ai.get("classification") or heuristics["classification"])
     slug = slugify(ai.get("slug") or heuristics["slug"] or classification)
     destination = unique_path(ARCHIVE_DIR / str(final_date.year) / f"{final_date.isoformat()}_{slug}.pdf"); destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(path), destination)
-    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "summary": (ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(slug_tokens(slug)), "tags": "", "is_duplicate": "", "duplicate_of": "", "source": source, "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z"})
+    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "summary": (ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(slug_tokens(slug)), "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z"})
     write_rows(rows); log.info("Archived %s", destination)
 
 def scan_incoming():

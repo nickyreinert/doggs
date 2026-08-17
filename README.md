@@ -7,7 +7,7 @@ It has no cloud account, no database server, and no mandatory AI dependency.
 ## What it does
 
 - Watches an inbox for new PDF files every five minutes, and scans once immediately at startup.
-- Extracts embedded text from the top of the first two pages.
+- Reads embedded PDF metadata (title, author, subject, keywords, creator, producer, and dates) and extracts visible text from the top of the first two pages.
 - Uses Tesseract OCR for scanned PDFs with little embedded text.
 - Optionally asks a local Ollama model for date, classification, filename slug, and summary.
 - Falls back to deterministic rules when Ollama is unavailable.
