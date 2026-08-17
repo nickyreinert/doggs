@@ -82,7 +82,7 @@ The installer creates `.venv`. When OCR is needed, it detects Homebrew and insta
 brew install tesseract tesseract-lang
 ```
 
-For German, enter `deu` for **Tesseract OCR language**. The installer verifies it before continuing.
+For German, enter `deu` for **Tesseract OCR language**. For combined German and English OCR, enter `deu+eng` (a comma is accepted and normalized too). The installer verifies each language before continuing.
 
 ### Ubuntu, Debian, and NAS systems
 

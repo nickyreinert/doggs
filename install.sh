@@ -24,24 +24,28 @@ load_env() {
 absolute_path() { [[ "$1" = /* ]] && printf '%s' "$1" || printf '%s/%s' "$BASE_DIR" "$1"; }
 ocr_language_installed() { command -v tesseract >/dev/null 2>&1 && tesseract --list-langs 2>/dev/null | tail -n +2 | grep -Fxq "$1"; }
 ensure_ocr_language() {
-  local language="$1"
-  if ocr_language_installed "$language"; then
-    success "Tesseract language '$language' is available."
-    return
-  fi
+  local requested="$1" language package_list=() missing=()
+  requested="${requested//,/+}"
+  IFS='+' read -r -a languages <<< "$requested"
+  for language in "${languages[@]}"; do
+    [[ -n "$language" ]] || continue
+    if ! ocr_language_installed "$language"; then missing+=("$language"); package_list+=("tesseract-ocr-$language"); fi
+  done
+  if [[ ${#missing[@]} -eq 0 ]]; then success "Tesseract language(s) '$requested' are available."; return; fi
   if command -v brew >/dev/null 2>&1; then
     info "Installing Tesseract and language data with Homebrew..."
     brew install tesseract tesseract-lang
   elif command -v apt-get >/dev/null 2>&1; then
     command -v sudo >/dev/null || { error "sudo is required to install Tesseract OCR."; exit 1; }
-    info "Installing Tesseract and language '$language'..."
+    info "Installing Tesseract language(s): ${missing[*]}..."
     sudo apt-get update
-    sudo apt-get install -y tesseract-ocr "tesseract-ocr-${language}"
+    sudo apt-get install -y tesseract-ocr "${package_list[@]}"
   else
-    error "Tesseract language '$language' is missing, and no supported package manager was found. Install Tesseract plus its language data, then rerun this installer."
+    error "Tesseract language(s) '${missing[*]}' are missing, and no supported package manager was found. Install Tesseract plus its language data, then rerun this installer."
     exit 1
   fi
-  ocr_language_installed "$language" || { error "Tesseract language '$language' could not be verified after installation."; exit 1; }
+  for language in "${missing[@]}"; do ocr_language_installed "$language" || { error "Tesseract language '$language' could not be verified after installation."; exit 1; }; done
+  success "Tesseract language(s) '$requested' are available."
 }
 if [[ ! -f "$BASE_DIR/app.py" ]]; then
   heading "DOGGS bootstrap"
@@ -67,7 +71,7 @@ if [[ "$CONFIGURE" == true ]]; then
   heading "Document storage configuration"
   INCOMING_DIR="$(ask "Incoming PDF folder" "$DEFAULT_INCOMING")"; ARCHIVE_DIR="$(ask "Archive folder" "$DEFAULT_ARCHIVE")"; DATA_DIR="$(ask "Index-data folder" "$DEFAULT_DATA")"
   ERROR_DIR="$(ask "Failed PDF folder" "${DEFAULT_DATA%/data}/errors")"; DUPLICATE_DIR="$(ask "Duplicate PDF folder" "${DEFAULT_DATA%/data}/duplicates")"
-  HOST="$(ask "Listen host (127.0.0.1 for local-only)" "0.0.0.0")"; PORT="$(ask "Listen port" "8383")"; OCR_LANG="$(ask "Tesseract OCR language" "eng")"
+  HOST="$(ask "Listen host (127.0.0.1 for local-only)" "0.0.0.0")"; PORT="$(ask "Listen port" "8383")"; OCR_LANG="$(ask "Tesseract OCR language (e.g. deu or deu+eng)" "eng")"; OCR_LANG="${OCR_LANG//,/+}"
   if yes_no "Enable local Ollama metadata extraction?" "y"; then
     AI_MODE="ollama"; OLLAMA_URL="$(ask "Ollama URL" "http://127.0.0.1:11434")"; AI_MODEL="$(ask "Ollama model" "qwen2.5:3b")"
     if command -v ollama >/dev/null 2>&1; then if yes_no "Pull $AI_MODEL with Ollama after DOGGS installs?" "n"; then PULL_MODEL=true; fi
