@@ -342,8 +342,27 @@ def update_file(row_id):
     if "tags" in payload:
         row["tags"] = " ".join(dict.fromkeys(slugify(tag) for tag in re.split(r"[\s,]+", str(payload["tags"])) if tag and slugify(tag) != "document"))
     if "summary" in payload: row["summary"] = str(payload["summary"]).strip()[:4000]
+    if "year" in payload or "filename" in payload:
+        current_path = file_path_for_row(row)
+        filename = Path(str(payload.get("filename", current_path.name))).name.strip()
+        if not filename or filename in {".", ".."}: abort(400, "Filename cannot be empty.")
+        if not filename.lower().endswith(".pdf"): filename += ".pdf"
+        if row.get("location") == "duplicates":
+            destination = DUPLICATE_DIR / filename
+        else:
+            year = str(payload.get("year", row.get("year", ""))).strip()
+            if not re.fullmatch(r"\d{4}", year): abort(400, "Year must contain four digits.")
+            destination = ARCHIVE_DIR / year / filename
+            row["year"] = year
+        if current_path != destination.resolve():
+            destination = unique_path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if current_path != destination.resolve():
+            shutil.move(str(current_path), destination)
+        base = DUPLICATE_DIR if row.get("location") == "duplicates" else ARCHIVE_DIR
+        row["stored_path"] = destination.relative_to(base).as_posix()
     write_rows(rows)
-    return jsonify({"ok": True, "tags": row["tags"], "summary": row["summary"]})
+    return jsonify({"ok": True, "tags": row["tags"], "summary": row["summary"], "year": row["year"], "name": Path(row["stored_path"]).name})
 
 @app.post("/api/file/<row_id>/full-scan")
 def full_scan_file(row_id):
