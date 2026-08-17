@@ -136,6 +136,8 @@ The footer reports Ollama connectivity, selected-model availability, and OCR-lan
 
 DOGGS defaults to `qwen2.5:3b`, a small model for local metadata extraction. Ollama is optional: documents still archive using deterministic heuristics when it is unavailable.
 
+When local AI is enabled during installation, `install.sh` installs Ollama automatically when it is missing and pulls the selected model (default: `qwen2.5:3b`).
+
 Install Ollama from [ollama.com](https://ollama.com/download), then pull the model:
 
 ```bash
