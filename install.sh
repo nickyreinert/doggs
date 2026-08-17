@@ -100,4 +100,7 @@ else
   command -v python3 >/dev/null || { error "python3 is required."; exit 1; }; heading "Installing local application"; python3 -m venv "$APP_DIR/.venv"; "$APP_DIR/.venv/bin/pip" install -U pip; "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
   load_env; ensure_ocr_language "$OCR_LANG"; mkdir -p "$(absolute_path "$INCOMING_DIR")" "$(absolute_path "$ARCHIVE_DIR")" "$(absolute_path "$DATA_DIR")" "$(absolute_path "$ERROR_DIR")" "$(absolute_path "$DUPLICATE_DIR")"; success "Installed. Start with ./run.sh, then open http://${HOST}:${PORT}"
 fi
-if [[ "$PULL_MODEL" == true ]]; then heading "Downloading local AI model"; ollama pull "$AI_MODEL"; fi
+if [[ "$PULL_MODEL" == true ]]; then
+  heading "Downloading local AI model"
+  ollama pull "$AI_MODEL"
+fi
