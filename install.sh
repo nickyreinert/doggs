@@ -27,14 +27,18 @@ ensure_ocr_language() {
     success "Tesseract language '$language' is available."
     return
   fi
-  if ! command -v apt-get >/dev/null 2>&1; then
-    error "Tesseract language '$language' is missing. Install it with your platform's package manager, then rerun this installer."
+  if command -v brew >/dev/null 2>&1; then
+    info "Installing Tesseract and language data with Homebrew..."
+    brew install tesseract tesseract-lang
+  elif command -v apt-get >/dev/null 2>&1; then
+    command -v sudo >/dev/null || { error "sudo is required to install Tesseract OCR."; exit 1; }
+    info "Installing Tesseract and language '$language'..."
+    sudo apt-get update
+    sudo apt-get install -y tesseract-ocr "tesseract-ocr-${language}"
+  else
+    error "Tesseract language '$language' is missing, and no supported package manager was found. Install Tesseract plus its language data, then rerun this installer."
     exit 1
   fi
-  command -v sudo >/dev/null || { error "sudo is required to install Tesseract OCR."; exit 1; }
-  info "Installing Tesseract and language '$language'..."
-  sudo apt-get update
-  sudo apt-get install -y tesseract-ocr "tesseract-ocr-${language}"
   ocr_language_installed "$language" || { error "Tesseract language '$language' could not be verified after installation."; exit 1; }
 }
 for arg in "$@"; do case "$arg" in --system) SYSTEM=true;; --local) SYSTEM=false;; -h|--help) usage; exit 0;; *) usage; exit 2;; esac; done

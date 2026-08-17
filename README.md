@@ -40,6 +40,6 @@ Set `AI_MODE=heuristic` to disable model calls entirely. Set `AI_MODEL`, `OLLAMA
 
 Run `./install.sh` from a complete checkout. Before it installs anything, it asks where documents should live, whether it should set up a systemd service, OCR language, and whether to use Ollama. If Ollama is not installed, it shows the official installation link and exact `ollama pull` command—nothing is downloaded from Ollama automatically.
 
-The installer verifies the selected Tesseract language and, on Ubuntu/Debian, automatically installs its package—for example, choosing `deu` installs `tesseract-ocr-deu`.
+The installer verifies the selected Tesseract language and installs it automatically: Ubuntu/Debian uses `tesseract-ocr-<language>` (for example `tesseract-ocr-deu`); macOS with Homebrew installs `tesseract` and `tesseract-lang`.
 
 The built-in web server has no authentication. Keep it on a trusted LAN, bind `HOST=127.0.0.1`, or put it behind authenticated reverse-proxy/Tailscale access.
