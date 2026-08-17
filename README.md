@@ -58,6 +58,12 @@ From the installed DOGGS folder, run:
 
 It downloads the latest code, refreshes Python dependencies, preserves `.env` and all document/index folders, and restarts `doggs.service` for `/opt/doggs` installations.
 
+To update with a one-liner from inside the installed DOGGS folder, use the update wrapper rather than the installer:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/nickyreinert/doggs/main/updates.sh?cache_bust=$(date +%s)" | bash
+```
+
 The scripts use plain high-contrast text by default. Set `DOGGS_COLOR=1` if your terminal theme renders ANSI colors clearly.
 
 ## Document flow
