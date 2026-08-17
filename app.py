@@ -61,6 +61,7 @@ WORKER_STARTED = False
 STATUS_CACHE = {"checked_at": 0.0, "payload": None}
 PIPELINE_STATE = {"processing": "", "last_scan": "", "last_error": "", "processed": 0}
 FULL_SCAN_STATE = {}
+LLM_RERUN_STATE = {"state": "idle", "current": 0, "total": 0, "error": ""}
 
 def ensure_dirs():
     for path in (INCOMING_DIR, ARCHIVE_DIR, DATA_DIR, ERROR_DIR, DUPLICATE_DIR, CSV_PATH.parent): path.mkdir(parents=True, exist_ok=True)
@@ -240,6 +241,23 @@ def run_full_scan(row_id):
         log.exception("Full scan failed for %s", row_id)
         FULL_SCAN_STATE[row_id] = {"state": "error", "error": str(exc)}
 
+def run_llm_rerun(row_ids):
+    LLM_RERUN_STATE.update(state="running", current=0, total=len(row_ids), error="")
+    try:
+        for row_id in row_ids:
+            rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
+            if row:
+                with fitz.open(file_path_for_row(row)) as doc: metadata = " ".join(extract_pdf_metadata(doc).values())
+                text, _ = extract_visible_text(file_path_for_row(row)); extracted = ai_extract(f"{metadata} {text}".strip())
+                if extracted:
+                    row["classification"] = slugify(extracted.get("classification") or row["classification"])
+                    row["summary"] = extracted.get("summary") or row["summary"]
+                    write_rows(rows)
+            LLM_RERUN_STATE["current"] += 1
+        LLM_RERUN_STATE["state"] = "complete"
+    except Exception as exc:
+        log.exception("LLM rerun failed"); LLM_RERUN_STATE.update(state="error", error=str(exc))
+
 def process_file(path):
     file_hash, rows = sha256_file(path), read_rows()
     original = next((row for row in rows if row.get("file_hash") == file_hash and row.get("location") != "duplicates"), None)
@@ -373,6 +391,7 @@ def api_status():
         "ocr_language": OCR_LANG,
         "ocr_available": OCR_LANG in ocr_languages,
         "pipeline": {"waiting": waiting[:30], "waiting_count": len(waiting), **PIPELINE_STATE},
+        "llm_rerun": LLM_RERUN_STATE,
     }
     STATUS_CACHE.update(checked_at=now, payload=payload)
     return jsonify(payload)
@@ -384,6 +403,14 @@ def api_scan():
     STATUS_CACHE["payload"] = None
     threading.Thread(target=scan_incoming, daemon=True).start()
     return jsonify({"started": True})
+
+@app.post("/api/rerun-llm")
+def api_rerun_llm():
+    row_ids = [str(value) for value in (request.get_json(silent=True) or {}).get("ids", []) if value]
+    if not row_ids: return jsonify({"started": False, "message": "No matching documents."}), 400
+    if LLM_RERUN_STATE.get("state") == "running": return jsonify({"started": False, "message": "LLM rerun already in progress."}), 409
+    threading.Thread(target=run_llm_rerun, args=(row_ids,), daemon=True).start()
+    return jsonify({"started": True, "count": len(row_ids)})
 
 @app.route("/file")
 def serve_file():
