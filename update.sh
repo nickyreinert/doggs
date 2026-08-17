@@ -5,7 +5,11 @@ SCRIPT_PATH="${BASH_SOURCE:-$0}"
 BASE_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 REPOSITORY_URL="https://github.com/nickyreinert/doggs.git"
 command -v git >/dev/null || { echo "[ERROR] Git is required for updates." >&2; exit 1; }
-git -C "$BASE_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "[ERROR] This installation is not a Git checkout. Reinstall DOGGS from a Git clone." >&2; exit 1; }
+if ! git -C "$BASE_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "[UPDATE] Initializing this installation as a Git checkout…"
+  git -C "$BASE_DIR" init -b main
+  git -C "$BASE_DIR" remote add origin "$REPOSITORY_URL"
+fi
 echo "[UPDATE] Fetching origin/main…"
 git -C "$BASE_DIR" fetch origin main
 echo "[UPDATE] Checking out the latest main…"
