@@ -53,16 +53,18 @@ Open [http://localhost:8383](http://localhost:8383), drop PDFs into the configur
 From the installed DOGGS folder, run:
 
 ```bash
-./updates.sh
+./update.sh
 ```
 
-It downloads the latest code, refreshes Python dependencies, preserves `.env` and all document/index folders, and restarts `doggs.service` for `/opt/doggs` installations.
+It uses `git pull --ff-only`, refreshes Python dependencies, preserves `.env` and all document/index folders, and restarts `doggs.service` for `/opt/doggs` installations.
 
 To update with a one-liner from inside the installed DOGGS folder, use the update wrapper rather than the installer:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/nickyreinert/doggs/main/updates.sh?cache_bust=$(date +%s)" | bash
+curl -fsSL "https://raw.githubusercontent.com/nickyreinert/doggs/main/update.sh?cache_bust=$(date +%s)" | bash
 ```
+
+The first update on an archive-based installation creates a shallow Git checkout; after that, plain `git pull` works from the DOGGS folder.
 
 The scripts use plain high-contrast text by default. Set `DOGGS_COLOR=1` if your terminal theme renders ANSI colors clearly.
 
