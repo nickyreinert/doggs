@@ -5,7 +5,7 @@ SCRIPT_PATH="${BASH_SOURCE:-$0}"
 BASE_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 SYSTEM=""; PULL_MODEL=false
 REPOSITORY_ARCHIVE="https://github.com/nickyreinert/doggs/archive/refs/heads/main.tar.gz"
-if [[ -t 1 ]]; then RESET=$'\033[0m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; BLUE=$'\033[34m'; CYAN=$'\033[36m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; else RESET= BOLD= DIM= BLUE= CYAN= GREEN= YELLOW= RED=; fi
+if [[ "${DOGGS_COLOR:-0}" == "1" && -t 1 ]]; then RESET=$'\033[0m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; BLUE=$'\033[34m'; CYAN=$'\033[36m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; else RESET= BOLD= DIM= BLUE= CYAN= GREEN= YELLOW= RED=; fi
 heading() { printf '\n%s%s%s\n' "$BOLD$BLUE" "$1" "$RESET" >&2; printf '%*s\n' "${#1}" '' | tr ' ' '=' >&2; }
 info() { printf '%s[INFO]%s %s\n' "$CYAN" "$RESET" "$1" >&2; }
 detail() { printf '%s[DETAIL]%s %s\n' "$DIM" "$RESET" "$1" >&2; }

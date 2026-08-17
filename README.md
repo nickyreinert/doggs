@@ -58,6 +58,8 @@ From the installed DOGGS folder, run:
 
 It downloads the latest code, refreshes Python dependencies, preserves `.env` and all document/index folders, and restarts `doggs.service` for `/opt/doggs` installations.
 
+The scripts use plain high-contrast text by default. Set `DOGGS_COLOR=1` if your terminal theme renders ANSI colors clearly.
+
 ## Document flow
 
 ```text
