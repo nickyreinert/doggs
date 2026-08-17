@@ -28,7 +28,7 @@ It asks for storage folders, local versus systemd installation, OCR language, an
 
 ### One-line installation
 
-This downloads the latest release into `./doggs` and starts the same interactive installer:
+This creates a shallow Git checkout in `./doggs` and starts the same interactive installer. Git must be installed first:
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/nickyreinert/doggs/main/install.sh?cache_bust=$(date +%s)" | bash
@@ -56,7 +56,7 @@ From the installed DOGGS folder, run:
 ./update.sh
 ```
 
-It uses `git pull --ff-only`, refreshes Python dependencies, preserves `.env` and all document/index folders, and restarts `doggs.service` for `/opt/doggs` installations.
+It fetches and checks out the latest `origin/main` commit. It does not download archives or alter configuration/data folders.
 
 To update with a one-liner from inside the installed DOGGS folder, use the update wrapper rather than the installer:
 

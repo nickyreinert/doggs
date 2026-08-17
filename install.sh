@@ -4,7 +4,6 @@ set -euo pipefail
 SCRIPT_PATH="${BASH_SOURCE:-$0}"
 BASE_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 SYSTEM=""; PULL_MODEL=false
-REPOSITORY_ARCHIVE="https://github.com/nickyreinert/doggs/archive/refs/heads/main.tar.gz"
 REPOSITORY_URL="https://github.com/nickyreinert/doggs.git"
 if [[ "${DOGGS_COLOR:-0}" == "1" && -t 1 ]]; then RESET=$'\033[0m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; BLUE=$'\033[34m'; CYAN=$'\033[36m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; else RESET= BOLD= DIM= BLUE= CYAN= GREEN= YELLOW= RED=; fi
 heading() { printf '\n%s%s%s\n' "$BOLD$BLUE" "$1" "$RESET" >&2; printf '%*s\n' "${#1}" '' | tr ' ' '=' >&2; }
@@ -52,14 +51,9 @@ if [[ ! -f "$BASE_DIR/app.py" ]]; then
   heading "DOGGS bootstrap"
   TARGET_DIR="${DOGGS_INSTALL_DIR:-$PWD/doggs}"
   command -v curl >/dev/null || { error "curl is required for one-line installation."; exit 1; }
-  command -v tar >/dev/null || { error "tar is required for one-line installation."; exit 1; }
-  info "Downloading the latest DOGGS release to $TARGET_DIR…"
-  if command -v git >/dev/null 2>&1; then
-    git clone --depth=1 "$REPOSITORY_URL" "$TARGET_DIR"
-  else
-    mkdir -p "$TARGET_DIR"
-    curl -fsSL "${REPOSITORY_ARCHIVE}?cache_bust=$(date +%s)" | tar -xz -C "$TARGET_DIR" --strip-components=1
-  fi
+  command -v git >/dev/null || { error "Git is required: DOGGS installs from a proper Git checkout. Install Git, then rerun this command."; exit 1; }
+  info "Cloning the latest DOGGS checkout to $TARGET_DIR…"
+  git clone --depth=1 "$REPOSITORY_URL" "$TARGET_DIR"
   exec "$TARGET_DIR/install.sh" "$@"
 fi
 for arg in "$@"; do case "$arg" in --system) SYSTEM=true;; --local) SYSTEM=false;; -h|--help) usage; exit 0;; *) usage; exit 2;; esac; done
