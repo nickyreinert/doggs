@@ -1,0 +1,18 @@
+[Unit]
+Description=DOGGS local PDF archive
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=doggs
+Group=doggs
+WorkingDirectory=/opt/doggs
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/doggs/.env
+ExecStart=/opt/doggs/.venv/bin/python /opt/doggs/app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
