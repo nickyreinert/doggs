@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Interactive DOGGS installer. Nothing is installed until the final confirmation.
 set -euo pipefail
-SCRIPT_PATH="${BASH_SOURCE[0]-$0}"
+SCRIPT_PATH="${BASH_SOURCE:-$0}"
 BASE_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 SYSTEM=""; PULL_MODEL=false
 REPOSITORY_ARCHIVE="https://github.com/nickyreinert/doggs/archive/refs/heads/main.tar.gz"
