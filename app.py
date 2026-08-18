@@ -34,6 +34,7 @@ INCOMING_DIR = configured_path("INCOMING_DIR", BASE_DIR / "incoming")
 ARCHIVE_DIR = configured_path("ARCHIVE_DIR", BASE_DIR / "archive")
 DATA_DIR = configured_path("DATA_DIR", BASE_DIR / "data")
 CSV_PATH = configured_path("CSV_PATH", DATA_DIR / "index.csv")
+SETTINGS_PATH = configured_path("SETTINGS_PATH", DATA_DIR / "settings.json")
 ERROR_DIR = configured_path("ERROR_DIR", BASE_DIR / "errors")
 DUPLICATE_DIR = configured_path("DUPLICATE_DIR", BASE_DIR / "duplicates")
 HOST, PORT = os.getenv("HOST", "0.0.0.0"), int(os.getenv("PORT", "8383"))
@@ -50,7 +51,7 @@ AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:3b")
 DATE_DAYFIRST = os.getenv("DATE_DAYFIRST", "1") == "1"
 MAX_TOKEN_FACETS = int(os.getenv("MAX_TOKEN_FACETS", "80"))
 FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "summary", "tokens", "tags", "is_duplicate", "duplicate_of", "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer", "source", "created_at"]
-STOP_TOKENS = {"the", "and", "for", "doc", "document", "pdf", "misc", "unknown"}
+STOP_TAGS = {"the", "and", "for", "doc", "document", "pdf", "misc", "unknown", "fpdf", "pdflib", "printer", "linux", "php", "kunde", "page", "pages", "creator", "producer"}
 CLASSIFICATION_RULES = [("invoice", ["invoice", "rechnung", "billing", "amount due", "zahlung"]), ("bank", ["bank statement", "kontoauszug", "iban", "balance", "transaction"]), ("insurance", ["insurance", "versicherung", "policy", "claim", "premium"]), ("contract", ["contract", "agreement", "vertrag", "terms"]), ("tax", ["tax", "steuer", "finanzamt", "vat"]), ("medical", ["medical", "arzt", "doctor", "patient"]), ("utility", ["electricity", "gas", "water", "internet", "phone"]), ("salary", ["salary", "payroll", "gehalt", "lohn"]), ("official", ["authority", "bescheid", "government", "court"]), ("receipt", ["receipt", "quittung", "purchase"])]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -61,7 +62,7 @@ if CSV_PATH.exists() and CSV_PATH.is_dir():
 app, CSV_LOCK, SCAN_LOCK = Flask(__name__), threading.RLock(), threading.Lock()
 WORKER_STARTED = False
 STATUS_CACHE = {"checked_at": 0.0, "payload": None}
-PIPELINE_STATE = {"processing": "", "last_scan": "", "last_error": "", "processed": 0}
+PIPELINE_STATE = {"processing": "", "last_scan": "", "last_error": "", "processed": 0, "paused": False}
 FULL_SCAN_STATE = {}
 LLM_RERUN_STATE = {"state": "idle", "current": 0, "total": 0, "error": ""}
 
@@ -105,9 +106,27 @@ def slugify(value):
     value = re.sub(r"[^a-z0-9]+", "-", (value or "").strip().lower())
     return re.sub(r"-{2,}", "-", value).strip("-")[:60].strip("-") or "document"
 
-def slug_tokens(slug): return [p for p in re.split(r"[-_ ]+", (slug or "").lower()) if p and p not in STOP_TOKENS]
-def custom_tags(row): return [slugify(tag) for tag in re.split(r"[\s,]+", row.get("tags", "")) if tag.strip()]
-def row_tags(row): return set(slug_tokens(row.get("slug", "")) + custom_tags(row))
+def tag_values(value):
+    values = value if isinstance(value, (list, tuple, set)) else re.split(r"[\s,]+", str(value or ""))
+    return [slugify(tag) for tag in values if str(tag).strip() and slugify(tag) != "document"]
+
+def ignored_tags():
+    try:
+        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        return set(tag_values(data.get("ignored_tags", [])))
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return set()
+
+def save_ignored_tags(tags):
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_PATH.write_text(json.dumps({"ignored_tags": sorted(set(tag_values(tags)))}, indent=2) + "\n", encoding="utf-8")
+
+def inferred_tags(row):
+    stored = tag_values(row.get("tokens", ""))
+    return [tag for tag in (stored or tag_values(row.get("slug", ""))) if tag not in STOP_TAGS and tag not in ignored_tags()]
+
+def custom_tags(row): return tag_values(row.get("tags", ""))
+def row_tags(row): return set(inferred_tags(row) + custom_tags(row))
 
 def unique_path(path):
     if not path.exists(): return path
@@ -190,16 +209,33 @@ def parse_text_date(text):
 
 def heuristic_extract(text, filename):
     lower = text.lower(); classification = next((kind for kind, words in CLASSIFICATION_RULES if any(word in lower for word in words)), "document")
-    candidates = [word.lower() for word in re.findall(r"\b[A-Z][A-Za-z0-9]{2,}\b", text[:350]) if word not in {"The", "Date", "Invoice", "Statement", "Contract", "Agreement"}]
-    return {"classification": classification, "slug": f"{classification}-{candidates[0] if candidates else slugify(Path(filename).stem).split('-')[0]}", "summary": re.sub(r"\s+", " ", text).strip()[:220]}
+    tags = {"invoice": ["rechnung"], "contract": ["vertrag"], "receipt": ["beleg"], "bank": ["konto"], "insurance": ["versicherung"]}.get(classification, [classification])
+    company = re.search(r"\b(?:firma|fa\.?)[\s:]+([A-ZÄÖÜ][\wÄÖÜäöüß.& -]{2,60})", text, re.I)
+    if company:
+        name = re.sub(r"\s+(?:inh\.?|herr|frau)\b.*", "", company.group(1), flags=re.I).strip(" ,.")
+        if name: tags.append(f"firma-{name}")
+    city = re.search(r"\b(?:D-)?\d{5}\s+([A-ZÄÖÜ][A-Za-zÄÖÜäöüß-]{2,})", text)
+    if city: tags.append(city.group(1))
+    date_match = re.search(r"\brechnungsdatum\s*:\s*(\d{1,2}[./]\d{1,2}[./]\d{4})", text, re.I)
+    if date_match: tags.append("rechnungsdatum")
+    tags = list(dict.fromkeys(tag_values(tags)))
+    company_label = company.group(1).split(" Inh.")[0].strip() if company else ""
+    city_label = city.group(1) if city else ""
+    if classification == "invoice":
+        details = ", ".join(value for value in (company_label, city_label, f"Rechnungsdatum {date_match.group(1)}" if date_match else "") if value)
+        summary = f"Rechnung{(' von ' + details) if details else ''}."
+    else: summary = re.sub(r"\s+", " ", text).strip()[:220]
+    return {"classification": classification, "slug": "-".join(tags[:3]) or slugify(Path(filename).stem).split("-")[0], "tags": tags, "summary": summary}
 
 def ai_extract(text):
     if AI_MODE != "ollama" or len(text.strip()) < 20: return {}
-    payload = {"model": AI_MODEL, "stream": False, "format": "json", "options": {"temperature": 0, "num_predict": 220}, "messages": [{"role": "system", "content": "Return only valid JSON. You extract document metadata; unknown fields are null."}, {"role": "user", "content": "Return JSON: date (YYYY-MM-DD|null), classification (one lowercase word), slug (2-5 lowercase hyphenated words), summary (one <=160-character sentence).\nDocument text:\n" + re.sub(r"\s+", " ", text)[:MAX_TEXT_CHARS]}]}
+    payload = {"model": AI_MODEL, "stream": False, "format": "json", "options": {"temperature": 0, "num_predict": 260}, "messages": [{"role": "system", "content": "Return only valid JSON. Extract useful human document metadata. Ignore PDF generators, software names, headers/footers, and OCR garbage. Prefer the document type, company/person, place, and meaningful date labels. Write the summary in the document language."}, {"role": "user", "content": "Return JSON: date (YYYY-MM-DD|null), classification (one lowercase word such as invoice), tags (array of 2-5 short lowercase hyphenated tags), slug (2-5 lowercase hyphenated words based on the useful tags), summary (one accurate <=160-character sentence). For a German invoice, tags should resemble rechnung, firma-sattig, darmstadt, rechnungsdatum — never fpdf, pdflib, printer, php, or linux.\nDocument text:\n" + re.sub(r"\s+", " ", text)[:MAX_TEXT_CHARS]}]}
     try:
         raw = requests.post(f"{OLLAMA_URL.rstrip('/')}/api/chat", json=payload, timeout=AI_TIMEOUT).json().get("message", {}).get("content", "")
         match = re.search(r"\{.*\}", raw, re.S); data = json.loads(match.group() if match else raw)
-        return {key: str(value).strip() for key, value in data.items() if key in {"date", "classification", "slug", "summary"} and value not in (None, "", "null", "unknown")}
+        extracted = {key: str(value).strip() for key, value in data.items() if key in {"date", "classification", "slug", "summary"} and value not in (None, "", "null", "unknown")}
+        extracted["tags"] = tag_values(data.get("tags", []))
+        return extracted
     except Exception:
         log.warning("Ollama extraction failed; using deterministic heuristics."); return {}
 
@@ -249,11 +285,15 @@ def run_llm_rerun(row_ids):
         for row_id in row_ids:
             rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
             if row:
-                with fitz.open(file_path_for_row(row)) as doc: metadata = " ".join(extract_pdf_metadata(doc).values())
+                with fitz.open(file_path_for_row(row)) as doc:
+                    pdf_metadata = extract_pdf_metadata(doc)
+                    metadata = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
                 text, _ = extract_visible_text(file_path_for_row(row)); extracted = ai_extract(f"{metadata} {text}".strip())
                 if extracted:
                     row["classification"] = slugify(extracted.get("classification") or row["classification"])
                     row["summary"] = extracted.get("summary") or row["summary"]
+                    if extracted.get("tags"): row["tokens"] = " ".join(extracted["tags"])
+                    if extracted.get("slug"): row["slug"] = slugify(extracted["slug"])
                     write_rows(rows)
             LLM_RERUN_STATE["current"] += 1
         LLM_RERUN_STATE["state"] = "complete"
@@ -273,15 +313,16 @@ def process_file(path):
             pdf_metadata = extract_pdf_metadata(doc)
         text, source = extract_visible_text(path)
     except Exception: raise
-    metadata_text = " ".join(value for value in pdf_metadata.values() if value)
+    metadata_text = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
     analysis_text = f"{metadata_text} {text}".strip()
     heuristics, ai = heuristic_extract(analysis_text, path.name), ai_extract(analysis_text)
     final_date = parse_any_date(ai.get("date")) or parse_text_date(analysis_text) or pdf_date or datetime.fromtimestamp(path.stat().st_mtime).date()
     classification = slugify(ai.get("classification") or heuristics["classification"])
-    slug = slugify(ai.get("slug") or heuristics["slug"] or classification)
+    inferred = ai.get("tags") or heuristics["tags"]
+    slug = slugify(ai.get("slug") or heuristics["slug"] or "-".join(inferred[:3]) or classification)
     destination = unique_path(ARCHIVE_DIR / str(final_date.year) / f"{final_date.isoformat()}_{slug}.pdf"); destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(path), destination)
-    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "summary": (ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(slug_tokens(slug)), "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
+    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "summary": (ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(inferred), "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
     write_rows(rows); log.info("Archived %s", destination)
 
 def scan_incoming():
@@ -311,7 +352,8 @@ def scan_incoming():
 
 def scan_loop():
     while True:
-        try: scan_incoming()
+        try:
+            if not PIPELINE_STATE["paused"]: scan_incoming()
         except Exception: log.exception("Scanner failed")
         time.sleep(POLL_SECONDS)
 
@@ -332,10 +374,10 @@ def api_index():
     duplicate_hashes = {value for value, count in Counter(row.get("file_hash") for row in rows if row.get("file_hash")).items() if count > 1}
     searched = search_rows(rows, query); files = [row for row in searched if (not years or row.get("year") in years) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
     year_rows = [row for row in searched if (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
-    token_rows = [row for row in searched if not years or row.get("year") in years]
-    counts = Counter(token for row in token_rows for token in row_tags(row))
+    tag_rows = [row for row in searched if not years or row.get("year") in years]
+    counts = Counter(tag for row in tag_rows for tag in row_tags(row))
     files.sort(key=lambda row: (row.get("date", ""), row.get("stored_path", "")), reverse=True)
-    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [{**row, "name": Path(row.get("stored_path", "")).name, "url": f"/file?id={quote(row.get('id', ''))}", "full_scan": FULL_SCAN_STATE.get(row.get("id"), {})} for row in files]})
+    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [{**row, "name": Path(row.get("stored_path", "")).name, "inferred_tags": inferred_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "full_scan": FULL_SCAN_STATE.get(row.get("id"), {})} for row in files]})
 
 @app.post("/api/file/<row_id>")
 def update_file(row_id):
@@ -424,6 +466,24 @@ def api_scan():
     STATUS_CACHE["payload"] = None
     threading.Thread(target=scan_incoming, daemon=True).start()
     return jsonify({"started": True})
+
+@app.post("/api/pipeline/pause")
+def toggle_pipeline_pause():
+    PIPELINE_STATE["paused"] = not PIPELINE_STATE["paused"]
+    STATUS_CACHE["payload"] = None
+    return jsonify({"paused": PIPELINE_STATE["paused"]})
+
+@app.route("/api/settings", methods=["GET", "POST"])
+def settings():
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        save_ignored_tags(payload.get("ignored_tags", []))
+    return jsonify({"ignored_tags": sorted(ignored_tags())})
+
+@app.post("/api/tags/<tag>/ignore")
+def ignore_tag(tag):
+    save_ignored_tags(list(ignored_tags()) + [tag])
+    return jsonify({"ignored_tags": sorted(ignored_tags())})
 
 @app.post("/api/rerun-llm")
 def api_rerun_llm():
