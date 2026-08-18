@@ -106,6 +106,19 @@ def write_rows(rows):
         with CSV_PATH.open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore"); writer.writeheader(); writer.writerows(rows)
 
+def mutate_row(row_id, mutation):
+    """Atomically update one indexed row without overwriting newer user edits."""
+    with CSV_LOCK:
+        ensure_dirs(); ensure_csv()
+        with CSV_PATH.open(newline="", encoding="utf-8") as f:
+            rows = [{field: row.get(field, "") for field in FIELDNAMES} for row in csv.DictReader(f)]
+        row = next((item for item in rows if item.get("id") == row_id), None)
+        if not row: return None
+        mutation(row)
+        with CSV_PATH.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore"); writer.writeheader(); writer.writerows(rows)
+        return dict(row)
+
 def sha256_file(path):
     digest = hashlib.sha256()
     with path.open("rb") as f:
@@ -355,9 +368,8 @@ def run_ocr(row_id, all_pages):
         if not row: raise ValueError("Document no longer exists in the index.")
         text = ocr_text(file_path_for_row(row), all_pages=all_pages)
         if not text: raise ValueError("OCR returned no text. Check the configured OCR language.")
-        for item in rows:
-            if item.get("id") == row_id: item["ocr_text"] = text; break
-        write_rows(rows); OCR_SCAN_STATE[row_id] = {"state": "complete", "error": ""}
+        if not mutate_row(row_id, lambda item: item.update(ocr_text=text)): raise ValueError("Document no longer exists in the index.")
+        OCR_SCAN_STATE[row_id] = {"state": "complete", "error": ""}
     except Exception as exc:
         log.exception("OCR failed for %s", row_id); OCR_SCAN_STATE[row_id] = {"state": "error", "error": str(exc)}
 
@@ -373,13 +385,10 @@ def run_normal_pipeline(row_id):
         text, source = (row.get("ocr_text", ""), "saved-ocr") if row.get("ocr_text", "").strip() else extract_normal_text(path)
         analysis = f"{metadata} {text}".strip()
         heuristic, extracted = heuristic_extract(analysis, path.name), ai_extract(analysis)
-        rows = read_rows()
-        for item in rows:
-            if item.get("id") != row_id: continue
+        def apply_extraction(item):
             replace_extracted_result(item, heuristic, extracted, analysis)
             item["source"] = source
-            break
-        write_rows(rows)
+        if not mutate_row(row_id, apply_extraction): raise ValueError("Document no longer exists in the index.")
         NORMAL_SCAN_STATE[row_id] = {"state": "complete", "error": ""}
     except Exception as exc:
         log.exception("Normal pipeline rerun failed for %s", row_id)
@@ -396,8 +405,8 @@ def run_llm_rerun(row_ids):
                     metadata = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
                 text, _ = extract_normal_text(file_path_for_row(row)); analysis = f"{metadata} {text}".strip()
                 heuristic, extracted = heuristic_extract(analysis, Path(row["stored_path"]).name), ai_extract(analysis)
-                replace_extracted_result(row, heuristic, extracted, analysis)
-                write_rows(rows)
+                if not mutate_row(row_id, lambda item: replace_extracted_result(item, heuristic, extracted, analysis)):
+                    raise ValueError("Document no longer exists in the index.")
             LLM_RERUN_STATE["current"] += 1
         LLM_RERUN_STATE["state"] = "complete"
     except Exception as exc:
