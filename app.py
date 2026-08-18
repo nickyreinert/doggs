@@ -66,6 +66,9 @@ PIPELINE_STATE = {"processing": "", "last_scan": "", "last_error": "", "processe
 FULL_SCAN_STATE = {}
 NORMAL_SCAN_STATE = {}
 LLM_RERUN_STATE = {"state": "idle", "current": 0, "total": 0, "error": ""}
+SCHEDULE_STATE = {"last_interval": 0.0, "daily_runs": set()}
+DEFAULT_METADATA_PROMPT = "Return JSON: date (YYYY-MM-DD|null), classification (one lowercase word such as invoice), tags (array of 2-5 short lowercase hyphenated tags), slug (2-5 lowercase hyphenated words based on the useful tags), summary (one accurate <=160-character sentence). For a German invoice, tags should resemble rechnung, firma-sattig, darmstadt, rechnungsdatum — never fpdf, pdflib, printer, php, or linux."
+DEFAULT_SUMMARY_PROMPT = "Summarize documents accurately in one concise paragraph. Return only the summary."
 
 def ensure_dirs():
     for path in (INCOMING_DIR, ARCHIVE_DIR, DATA_DIR, ERROR_DIR, DUPLICATE_DIR, CSV_PATH.parent): path.mkdir(parents=True, exist_ok=True)
@@ -111,16 +114,23 @@ def tag_values(value):
     values = value if isinstance(value, (list, tuple, set)) else re.split(r"[\s,]+", str(value or ""))
     return [slugify(tag) for tag in values if str(tag).strip() and slugify(tag) != "document"]
 
-def ignored_tags():
+def read_settings():
     try:
         data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-        return set(tag_values(data.get("ignored_tags", [])))
     except (OSError, json.JSONDecodeError, AttributeError):
-        return set()
+        data = {}
+    prompts, schedule = data.get("prompts", {}), data.get("schedule", {})
+    times = [value for value in schedule.get("daily_times", []) if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(value))]
+    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "prompts": {"metadata": str(prompts.get("metadata") or DEFAULT_METADATA_PROMPT), "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
+
+def write_settings(settings):
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_PATH.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+
+def ignored_tags(): return set(read_settings()["ignored_tags"])
 
 def save_ignored_tags(tags):
-    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_PATH.write_text(json.dumps({"ignored_tags": sorted(set(tag_values(tags)))}, indent=2) + "\n", encoding="utf-8")
+    settings = read_settings(); settings["ignored_tags"] = sorted(set(tag_values(tags))); write_settings(settings)
 
 def inferred_tags(row):
     stored = tag_values(row.get("tokens", ""))
@@ -259,7 +269,8 @@ def combined_tags(heuristic, extracted, text):
 
 def ai_extract(text):
     if AI_MODE != "ollama" or len(text.strip()) < 20: return {}
-    payload = {"model": AI_MODEL, "stream": False, "format": "json", "options": {"temperature": 0, "num_predict": 260}, "messages": [{"role": "system", "content": "Return only valid JSON. Extract useful human document metadata. Ignore PDF generators, software names, headers/footers, and OCR garbage. Prefer the document type, company/person, place, and meaningful date labels. Write the summary in the document language."}, {"role": "user", "content": "Return JSON: date (YYYY-MM-DD|null), classification (one lowercase word such as invoice), tags (array of 2-5 short lowercase hyphenated tags), slug (2-5 lowercase hyphenated words based on the useful tags), summary (one accurate <=160-character sentence). For a German invoice, tags should resemble rechnung, firma-sattig, darmstadt, rechnungsdatum — never fpdf, pdflib, printer, php, or linux.\nDocument text:\n" + re.sub(r"\s+", " ", text)[:MAX_TEXT_CHARS]}]}
+    prompt = read_settings()["prompts"]["metadata"]
+    payload = {"model": AI_MODEL, "stream": False, "format": "json", "options": {"temperature": 0, "num_predict": 260}, "messages": [{"role": "system", "content": "Return only valid JSON. Extract useful human document metadata. Ignore PDF generators, software names, headers/footers, and OCR garbage. Prefer the document type, company/person, place, and meaningful date labels. Write the summary in the document language."}, {"role": "user", "content": prompt + "\n\nDocument text:\n" + re.sub(r"\s+", " ", text)[:MAX_TEXT_CHARS]}]}
     try:
         raw = requests.post(f"{OLLAMA_URL.rstrip('/')}/api/chat", json=payload, timeout=AI_TIMEOUT).json().get("message", {}).get("content", "")
         match = re.search(r"\{.*\}", raw, re.S); data = json.loads(match.group() if match else raw)
@@ -271,7 +282,7 @@ def ai_extract(text):
 
 def ai_summary(text):
     if AI_MODE != "ollama" or not text.strip(): return ""
-    payload = {"model": AI_MODEL, "stream": False, "options": {"temperature": 0, "num_predict": 260}, "messages": [{"role": "system", "content": "Summarize documents accurately in one concise paragraph. Return only the summary."}, {"role": "user", "content": re.sub(r"\s+", " ", text)[:MAX_FULL_TEXT_CHARS]}]}
+    payload = {"model": AI_MODEL, "stream": False, "options": {"temperature": 0, "num_predict": 260}, "messages": [{"role": "system", "content": read_settings()["prompts"]["summary"]}, {"role": "user", "content": re.sub(r"\s+", " ", text)[:MAX_FULL_TEXT_CHARS]}]}
     try:
         response = requests.post(f"{OLLAMA_URL.rstrip('/')}/api/chat", json=payload, timeout=max(AI_TIMEOUT, 180)); response.raise_for_status()
         return response.json().get("message", {}).get("content", "").strip()[:1000]
@@ -410,12 +421,25 @@ def scan_incoming():
     finally:
         SCAN_LOCK.release()
 
+def due_for_background_scan():
+    schedule = read_settings()["schedule"]
+    if schedule["mode"] == "daily":
+        now = datetime.now(); key = f"{now.date().isoformat()}-{now.strftime('%H:%M')}"
+        SCHEDULE_STATE["daily_runs"] = {value for value in SCHEDULE_STATE["daily_runs"] if value.startswith(now.date().isoformat())}
+        if now.strftime("%H:%M") in schedule["daily_times"] and key not in SCHEDULE_STATE["daily_runs"]:
+            SCHEDULE_STATE["daily_runs"].add(key); return True
+        return False
+    now = time.monotonic()
+    if now - SCHEDULE_STATE["last_interval"] >= schedule["interval_minutes"] * 60:
+        SCHEDULE_STATE["last_interval"] = now; return True
+    return False
+
 def scan_loop():
     while True:
         try:
-            if not PIPELINE_STATE["paused"]: scan_incoming()
+            if not PIPELINE_STATE["paused"] and due_for_background_scan(): scan_incoming()
         except Exception: log.exception("Scanner failed")
-        time.sleep(POLL_SECONDS)
+        time.sleep(15)
 
 def start_worker():
     global WORKER_STARTED
@@ -539,7 +563,7 @@ def api_status():
         "error": error,
         "ocr_language": OCR_LANG,
         "ocr_available": all(language in ocr_languages for language in OCR_LANGS),
-        "pipeline": {"waiting": waiting[:30], "waiting_count": len(waiting), **PIPELINE_STATE},
+        "pipeline": {"waiting": waiting[:30], "waiting_count": len(waiting), "schedule": read_settings()["schedule"], **PIPELINE_STATE},
         "llm_rerun": LLM_RERUN_STATE,
     }
     STATUS_CACHE.update(checked_at=now, payload=payload)
@@ -563,8 +587,21 @@ def toggle_pipeline_pause():
 def settings():
     if request.method == "POST":
         payload = request.get_json(silent=True) or {}
-        save_ignored_tags(payload.get("ignored_tags", []))
-    return jsonify({"ignored_tags": sorted(ignored_tags())})
+        current = read_settings(); current["ignored_tags"] = sorted(set(tag_values(payload.get("ignored_tags", current["ignored_tags"]))))
+        prompts = payload.get("prompts", {})
+        if isinstance(prompts, dict):
+            for key in ("metadata", "summary"):
+                if key in prompts: current["prompts"][key] = str(prompts[key]).strip() or (DEFAULT_METADATA_PROMPT if key == "metadata" else DEFAULT_SUMMARY_PROMPT)
+        schedule = payload.get("schedule", {})
+        if isinstance(schedule, dict):
+            current["schedule"]["mode"] = "daily" if schedule.get("mode") == "daily" else "interval"
+            try: current["schedule"]["interval_minutes"] = max(1, min(10080, int(schedule.get("interval_minutes", current["schedule"]["interval_minutes"]))))
+            except (TypeError, ValueError): pass
+            values = schedule.get("daily_times", current["schedule"]["daily_times"])
+            if isinstance(values, str): values = re.split(r"[\s,]+", values)
+            if isinstance(values, list): current["schedule"]["daily_times"] = sorted(set(value for value in values if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(value))))
+        write_settings(current); STATUS_CACHE["payload"] = None
+    return jsonify(read_settings())
 
 @app.post("/api/tags/<tag>/ignore")
 def ignore_tag(tag):
