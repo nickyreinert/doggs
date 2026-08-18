@@ -69,7 +69,11 @@ OCR_SCAN_STATE = {}
 NORMAL_SCAN_STATE = {}
 LLM_RERUN_STATE = {"state": "idle", "current": 0, "total": 0, "error": ""}
 SCHEDULE_STATE = {"last_interval": 0.0, "daily_runs": set()}
-DEFAULT_METADATA_PROMPT = "Return JSON: date (YYYY-MM-DD|null), classification (one lowercase word such as invoice), tags (array of 2-5 short lowercase hyphenated tags), slug (2-5 lowercase hyphenated words based on the useful tags), summary (one accurate <=160-character sentence). For a German invoice, tags should resemble rechnung, firma-sattig, darmstadt, rechnungsdatum — never fpdf, pdflib, printer, php, or linux."
+LEGACY_METADATA_PROMPT = "Return JSON: date (YYYY-MM-DD|null), classification (one lowercase word such as invoice), tags (array of 2-5 short lowercase hyphenated tags), slug (2-5 lowercase hyphenated words based on the useful tags), summary (one accurate <=160-character sentence). For a German invoice, tags should resemble rechnung, firma-sattig, darmstadt, rechnungsdatum — never fpdf, pdflib, printer, php, or linux."
+DEFAULT_METADATA_PROMPT = """Extract metadata only from the supplied document text. Return one JSON object and nothing else:
+{"date":"YYYY-MM-DD or null","classification":"one lowercase category","tags":["2 to 5 lowercase-hyphenated tags"],"slug":"2 to 5 lowercase-hyphenated words","summary":"one accurate sentence, at most 160 characters"}.
+
+Tags must be specific facts visibly present in this document: its document type, the actual sender/company/person, actual city, or a meaningful labelled date. Do not use examples, defaults, guesses, or facts from another document. If a fact is not present, omit it; fewer tags are better than invented tags. Never use PDF generator, software, printer, operating-system, web-browser, or OCR artefact names. For an invoice, include the document-type tag only when the text says it is an invoice; use the real company and real place only when they occur in the text."""
 DEFAULT_SUMMARY_PROMPT = "Summarize documents accurately in one concise paragraph. Return only the summary."
 
 def ensure_dirs():
@@ -126,8 +130,13 @@ def read_settings():
     except (OSError, json.JSONDecodeError, AttributeError):
         data = {}
     prompts, schedule = data.get("prompts", {}), data.get("schedule", {})
+    metadata_prompt = str(prompts.get("metadata") or DEFAULT_METADATA_PROMPT)
+    # Upgrade the former prompt: its literal invoice example made small models copy
+    # those company/city values into unrelated documents.
+    if metadata_prompt == LEGACY_METADATA_PROMPT:
+        metadata_prompt = DEFAULT_METADATA_PROMPT
     times = [value for value in schedule.get("daily_times", []) if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(value))]
-    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "prompts": {"metadata": str(prompts.get("metadata") or DEFAULT_METADATA_PROMPT), "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
+    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "prompts": {"metadata": metadata_prompt, "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
 
 def write_settings(settings):
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -276,7 +285,7 @@ def combined_tags(heuristic, extracted, text):
 def ai_extract(text):
     if AI_MODE != "ollama" or len(text.strip()) < 20: return {}
     prompt = read_settings()["prompts"]["metadata"]
-    payload = {"model": AI_MODEL, "stream": False, "format": "json", "options": {"temperature": 0, "num_predict": 260}, "messages": [{"role": "system", "content": "Return only valid JSON. Extract useful human document metadata. Ignore PDF generators, software names, headers/footers, and OCR garbage. Prefer the document type, company/person, place, and meaningful date labels. Write the summary in the document language."}, {"role": "user", "content": prompt + "\n\nDocument keywords and values (common stop words removed):\n" + compact_prompt_text(text)}]}
+    payload = {"model": AI_MODEL, "stream": False, "format": "json", "options": {"temperature": 0, "num_predict": 260}, "messages": [{"role": "system", "content": "Return only valid JSON. Every extracted tag must be grounded in the supplied document text. Never copy names, places, or tag values from instructions. Omit uncertain data instead of guessing. Ignore PDF generators, software names, headers/footers, and OCR garbage. Write the summary in the document language."}, {"role": "user", "content": prompt + "\n\nDocument evidence (common stop words removed):\n" + compact_prompt_text(text)}]}
     try:
         raw = requests.post(f"{OLLAMA_URL.rstrip('/')}/api/chat", json=payload, timeout=AI_TIMEOUT).json().get("message", {}).get("content", "")
         match = re.search(r"\{.*\}", raw, re.S); data = json.loads(match.group() if match else raw)
