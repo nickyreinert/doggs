@@ -545,7 +545,7 @@ def file_details(row_id):
         row["ocr_text"] = str((request.get_json(silent=True) or {}).get("ocr_text", ""))[:MAX_FULL_TEXT_CHARS]
         write_rows(rows)
     metadata = {key.removeprefix("pdf_"): row.get(key, "") for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer") if row.get(key)}
-    return jsonify({"ocr_text": row.get("ocr_text", ""), "metadata": metadata, "ocr_scan": OCR_SCAN_STATE.get(row_id, {}), "normal_scan": NORMAL_SCAN_STATE.get(row_id, {})})
+    return jsonify({"ocr_text": row.get("ocr_text", ""), "full_path": str(file_path_for_row(row)), "metadata": metadata, "ocr_scan": OCR_SCAN_STATE.get(row_id, {}), "normal_scan": NORMAL_SCAN_STATE.get(row_id, {})})
 
 @app.post("/api/file/<row_id>/ocr")
 def ocr_file(row_id):
