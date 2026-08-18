@@ -1,12 +1,12 @@
 [Unit]
 Description=DOGGS local PDF archive
-After=network-online.target
+After=network-online.target local-fs.target remote-fs.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=doggs
-Group=doggs
+User=__DOGGS_SERVICE_USER__
+Group=__DOGGS_SERVICE_GROUP__
 WorkingDirectory=/opt/doggs
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/opt/doggs/.env

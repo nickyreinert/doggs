@@ -102,6 +102,8 @@ Run the same installer and answer `y` to **Install as a systemd service**:
 
 It installs Python, Tesseract, and the selected language package (for example `tesseract-ocr-deu`), installs the app under `/opt/doggs`, and starts `doggs.service`.
 
+The system service is enabled at boot and runs in the background as the account that installed DOGGS, so it can access that account's mounted document folders. Do not run `run.sh` for a system install. To inspect it, use `sudo systemctl status doggs --no-pager`; its logs are available through `sudo journalctl -u doggs -n 100 --no-pager`.
+
 ```bash
 sudo systemctl status doggs
 sudo systemctl restart doggs

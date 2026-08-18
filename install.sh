@@ -85,6 +85,7 @@ heading "DOGGS setup"
 info "No packages have been installed yet."
 if [[ -z "$SYSTEM" ]]; then if yes_no "Install as a systemd service (Ubuntu/NAS)?" "n"; then SYSTEM=true; else SYSTEM=false; fi; fi
 if [[ "$SYSTEM" == true ]]; then APP_DIR="/opt/doggs"; DEFAULT_INCOMING="/opt/doggs/incoming"; DEFAULT_ARCHIVE="/opt/doggs/archive"; DEFAULT_DATA="/opt/doggs/data"; else APP_DIR="$BASE_DIR"; DEFAULT_INCOMING="./incoming"; DEFAULT_ARCHIVE="./archive"; DEFAULT_DATA="./data"; fi
+SERVICE_USER="$(id -un)"; SERVICE_GROUP="$(id -gn)"
 
 CONFIGURE=true
 if [[ -f "$BASE_DIR/.env" ]] && ! yes_no "A .env file already exists. Replace it with new settings?" "n"; then CONFIGURE=false; fi
@@ -130,9 +131,10 @@ if [[ "$SYSTEM" == true ]]; then
   heading "Installing system service"
   sudo apt-get update; sudo apt-get install -y curl git python3 python3-venv python3-pip
   ensure_ocr_language "$OCR_LANG"
-  sudo useradd -r -s /usr/sbin/nologin doggs 2>/dev/null || true; sudo mkdir -p "$APP_DIR"; sudo cp -a "$BASE_DIR/." "$APP_DIR/"; sudo chown -R doggs:doggs "$APP_DIR"; sudo rm -rf "$APP_DIR/.venv"
-  sudo -u doggs python3 -m venv "$APP_DIR/.venv"; sudo -u doggs "$APP_DIR/.venv/bin/pip" install -U pip; sudo -u doggs "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
-  sudo cp "$APP_DIR/doggs.service" /etc/systemd/system/doggs.service; sudo systemctl daemon-reload; sudo systemctl enable --now doggs; success "Installed. Open $(open_address)"
+  sudo mkdir -p "$APP_DIR"; sudo cp -a "$BASE_DIR/." "$APP_DIR/"; sudo chown -R "$SERVICE_USER:$SERVICE_GROUP" "$APP_DIR"; sudo rm -rf "$APP_DIR/.venv"
+  sudo -u "$SERVICE_USER" python3 -m venv "$APP_DIR/.venv"; sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/pip" install -U pip; sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
+  sed "s/__DOGGS_SERVICE_USER__/$SERVICE_USER/g;s/__DOGGS_SERVICE_GROUP__/$SERVICE_GROUP/g" "$APP_DIR/doggs.service" | sudo tee /etc/systemd/system/doggs.service >/dev/null; sudo systemctl daemon-reload; sudo systemctl enable --now doggs
+  if sudo systemctl is-active --quiet doggs; then success "doggs.service is enabled for startup and running. Open $(open_address)"; else error "doggs.service was installed but did not start. Run: sudo systemctl status doggs --no-pager"; exit 1; fi
 else
   command -v python3 >/dev/null || { error "python3 is required."; exit 1; }; heading "Installing local application"; python3 -m venv "$APP_DIR/.venv"; "$APP_DIR/.venv/bin/pip" install -U pip; "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
   load_env; ensure_ocr_language "$OCR_LANG"; mkdir -p "$(absolute_path "$INCOMING_DIR")" "$(absolute_path "$ARCHIVE_DIR")" "$(absolute_path "$DATA_DIR")" "$(absolute_path "$ERROR_DIR")" "$(absolute_path "$DUPLICATE_DIR")"; success "Installed. Start with ./run.sh, then open $(open_address)"
