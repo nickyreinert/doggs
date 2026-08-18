@@ -50,8 +50,9 @@ AI_MODE, OLLAMA_URL = os.getenv("AI_MODE", "ollama"), os.getenv("OLLAMA_URL", "h
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:3b")
 DATE_DAYFIRST = os.getenv("DATE_DAYFIRST", "1") == "1"
 MAX_TOKEN_FACETS = int(os.getenv("MAX_TOKEN_FACETS", "80"))
-FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "summary", "tokens", "removed_tags", "tags", "is_duplicate", "duplicate_of", "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer", "source", "created_at"]
+FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "summary", "tokens", "removed_tags", "tags", "ocr_text", "is_duplicate", "duplicate_of", "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer", "source", "created_at"]
 STOP_TAGS = {"the", "and", "for", "doc", "document", "pdf", "misc", "unknown", "fpdf", "pdflib", "printer", "linux", "php", "kunde", "page", "pages", "creator", "producer"}
+PROMPT_STOP_WORDS = STOP_TAGS | {"a", "an", "are", "as", "at", "be", "by", "from", "in", "is", "it", "of", "on", "or", "that", "this", "to", "with", "der", "die", "das", "den", "dem", "des", "ein", "eine", "einer", "einem", "einen", "und", "oder", "ist", "im", "in", "am", "an", "auf", "von", "für", "mit", "zu", "bei", "als", "auch", "nicht", "wie", "dass"}
 CLASSIFICATION_RULES = [("invoice", ["invoice", "rechnung", "billing", "amount due", "zahlung"]), ("bank", ["bank statement", "kontoauszug", "iban", "balance", "transaction"]), ("insurance", ["insurance", "versicherung", "policy", "claim", "premium"]), ("contract", ["contract", "agreement", "vertrag", "terms"]), ("tax", ["tax", "steuer", "finanzamt", "vat"]), ("medical", ["medical", "arzt", "doctor", "patient"]), ("utility", ["electricity", "gas", "water", "internet", "phone"]), ("salary", ["salary", "payroll", "gehalt", "lohn"]), ("official", ["authority", "bescheid", "government", "court"]), ("receipt", ["receipt", "quittung", "purchase"])]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -64,6 +65,7 @@ WORKER_STARTED = False
 STATUS_CACHE = {"checked_at": 0.0, "payload": None}
 PIPELINE_STATE = {"processing": "", "last_scan": "", "last_error": "", "processed": 0, "paused": False}
 FULL_SCAN_STATE = {}
+OCR_SCAN_STATE = {}
 NORMAL_SCAN_STATE = {}
 LLM_RERUN_STATE = {"state": "idle", "current": 0, "total": 0, "error": ""}
 SCHEDULE_STATE = {"last_interval": 0.0, "daily_runs": set()}
@@ -113,6 +115,10 @@ def slugify(value):
 def tag_values(value):
     values = value if isinstance(value, (list, tuple, set)) else re.split(r"[\s,]+", str(value or ""))
     return [slugify(tag) for tag in values if str(tag).strip() and slugify(tag) != "document"]
+
+def compact_prompt_text(text):
+    words = re.findall(r"[\wÄÖÜäöüß.-]+", text)
+    return " ".join(word for word in words if word.lower().strip(".-") not in PROMPT_STOP_WORDS)[:MAX_TEXT_CHARS]
 
 def read_settings():
     try:
@@ -270,7 +276,7 @@ def combined_tags(heuristic, extracted, text):
 def ai_extract(text):
     if AI_MODE != "ollama" or len(text.strip()) < 20: return {}
     prompt = read_settings()["prompts"]["metadata"]
-    payload = {"model": AI_MODEL, "stream": False, "format": "json", "options": {"temperature": 0, "num_predict": 260}, "messages": [{"role": "system", "content": "Return only valid JSON. Extract useful human document metadata. Ignore PDF generators, software names, headers/footers, and OCR garbage. Prefer the document type, company/person, place, and meaningful date labels. Write the summary in the document language."}, {"role": "user", "content": prompt + "\n\nDocument text:\n" + re.sub(r"\s+", " ", text)[:MAX_TEXT_CHARS]}]}
+    payload = {"model": AI_MODEL, "stream": False, "format": "json", "options": {"temperature": 0, "num_predict": 260}, "messages": [{"role": "system", "content": "Return only valid JSON. Extract useful human document metadata. Ignore PDF generators, software names, headers/footers, and OCR garbage. Prefer the document type, company/person, place, and meaningful date labels. Write the summary in the document language."}, {"role": "user", "content": prompt + "\n\nDocument keywords and values (common stop words removed):\n" + compact_prompt_text(text)}]}
     try:
         raw = requests.post(f"{OLLAMA_URL.rstrip('/')}/api/chat", json=payload, timeout=AI_TIMEOUT).json().get("message", {}).get("content", "")
         match = re.search(r"\{.*\}", raw, re.S); data = json.loads(match.group() if match else raw)
@@ -289,14 +295,16 @@ def ai_summary(text):
     except requests.RequestException:
         log.warning("Ollama full-document summary failed."); return ""
 
-def full_ocr_text(path):
+def ocr_text(path, all_pages=False):
     parts = []
     with fitz.open(path) as doc:
-        for index in range(len(doc)):
+        for index in range(len(doc) if all_pages else min(len(doc), 1)):
             page = doc.load_page(index); zoom = max(1, OCR_DPI / 72); pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
             image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             parts.append(pytesseract.image_to_string(image, lang=OCR_LANG))
     return re.sub(r"\s+", " ", "\n".join(parts)).strip()[:MAX_FULL_TEXT_CHARS]
+
+def full_ocr_text(path): return ocr_text(path, all_pages=True)
 
 def file_path_for_row(row):
     base = DUPLICATE_DIR if row.get("location") == "duplicates" else ARCHIVE_DIR
@@ -313,12 +321,25 @@ def run_full_scan(row_id):
         rows = read_rows()
         for item in rows:
             if item.get("id") == row_id:
-                item["summary"] = summary; item["source"] = "full-ocr"; break
+                item["summary"] = summary; item["ocr_text"] = text; item["source"] = "full-ocr"; break
         write_rows(rows)
         FULL_SCAN_STATE[row_id] = {"state": "complete", "error": ""}
     except Exception as exc:
         log.exception("Full scan failed for %s", row_id)
         FULL_SCAN_STATE[row_id] = {"state": "error", "error": str(exc)}
+
+def run_ocr(row_id, all_pages):
+    OCR_SCAN_STATE[row_id] = {"state": "running", "error": ""}
+    try:
+        rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
+        if not row: raise ValueError("Document no longer exists in the index.")
+        text = ocr_text(file_path_for_row(row), all_pages=all_pages)
+        if not text: raise ValueError("OCR returned no text. Check the configured OCR language.")
+        for item in rows:
+            if item.get("id") == row_id: item["ocr_text"] = text; break
+        write_rows(rows); OCR_SCAN_STATE[row_id] = {"state": "complete", "error": ""}
+    except Exception as exc:
+        log.exception("OCR failed for %s", row_id); OCR_SCAN_STATE[row_id] = {"state": "error", "error": str(exc)}
 
 def run_normal_pipeline(row_id):
     NORMAL_SCAN_STATE[row_id] = {"state": "running", "error": ""}
@@ -329,7 +350,8 @@ def run_normal_pipeline(row_id):
         with fitz.open(path) as doc:
             pdf_metadata = extract_pdf_metadata(doc)
         metadata = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
-        text, source = extract_normal_text(path); analysis = f"{metadata} {text}".strip()
+        text, source = (row.get("ocr_text", ""), "saved-ocr") if row.get("ocr_text", "").strip() else extract_normal_text(path)
+        analysis = f"{metadata} {text}".strip()
         heuristic, extracted = heuristic_extract(analysis, path.name), ai_extract(analysis)
         tags = combined_tags(heuristic, extracted, analysis)
         rows = read_rows()
@@ -461,7 +483,7 @@ def api_index():
     tag_rows = [row for row in searched if (not years or row.get("year") in years) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
     counts = Counter(tag for row in tag_rows for tag in row_tags(row))
     files.sort(key=lambda row: (row.get("date", ""), row.get("stored_path", "")), reverse=True)
-    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [{**row, "name": Path(row.get("stored_path", "")).name, "document_tags": document_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})} for row in files]})
+    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [{**row, "name": Path(row.get("stored_path", "")).name, "document_tags": document_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "ocr_scan": OCR_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})} for row in files]})
 
 @app.post("/api/file/<row_id>")
 def update_file(row_id):
@@ -491,6 +513,24 @@ def update_file(row_id):
         row["stored_path"] = destination.relative_to(base).as_posix()
     write_rows(rows)
     return jsonify({"ok": True, "tags": row["tags"], "summary": row["summary"], "year": row["year"], "name": Path(row["stored_path"]).name})
+
+@app.route("/api/file/<row_id>/details", methods=["GET", "POST"])
+def file_details(row_id):
+    rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
+    if not row: abort(404)
+    if request.method == "POST":
+        row["ocr_text"] = str((request.get_json(silent=True) or {}).get("ocr_text", ""))[:MAX_FULL_TEXT_CHARS]
+        write_rows(rows)
+    metadata = {key.removeprefix("pdf_"): row.get(key, "") for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer") if row.get(key)}
+    return jsonify({"ocr_text": row.get("ocr_text", ""), "metadata": metadata, "ocr_scan": OCR_SCAN_STATE.get(row_id, {}), "normal_scan": NORMAL_SCAN_STATE.get(row_id, {})})
+
+@app.post("/api/file/<row_id>/ocr")
+def ocr_file(row_id):
+    if OCR_SCAN_STATE.get(row_id, {}).get("state") == "running": return jsonify({"started": False, "message": "OCR is already running."}), 409
+    if not any(row.get("id") == row_id for row in read_rows()): abort(404)
+    all_pages = bool((request.get_json(silent=True) or {}).get("all_pages", False))
+    threading.Thread(target=run_ocr, args=(row_id, all_pages), daemon=True).start()
+    return jsonify({"started": True})
 
 @app.post("/api/file/<row_id>/tags")
 def add_file_tag(row_id):
