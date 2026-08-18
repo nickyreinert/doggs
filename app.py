@@ -64,6 +64,7 @@ WORKER_STARTED = False
 STATUS_CACHE = {"checked_at": 0.0, "payload": None}
 PIPELINE_STATE = {"processing": "", "last_scan": "", "last_error": "", "processed": 0, "paused": False}
 FULL_SCAN_STATE = {}
+NORMAL_SCAN_STATE = {}
 LLM_RERUN_STATE = {"state": "idle", "current": 0, "total": 0, "error": ""}
 
 def ensure_dirs():
@@ -279,6 +280,32 @@ def run_full_scan(row_id):
         log.exception("Full scan failed for %s", row_id)
         FULL_SCAN_STATE[row_id] = {"state": "error", "error": str(exc)}
 
+def run_normal_pipeline(row_id):
+    NORMAL_SCAN_STATE[row_id] = {"state": "running", "error": ""}
+    try:
+        rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
+        if not row: raise ValueError("Document no longer exists in the index.")
+        path = file_path_for_row(row)
+        with fitz.open(path) as doc:
+            pdf_metadata = extract_pdf_metadata(doc)
+        metadata = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
+        text, source = extract_visible_text(path); analysis = f"{metadata} {text}".strip()
+        heuristic, extracted = heuristic_extract(analysis, path.name), ai_extract(analysis)
+        rows = read_rows()
+        for item in rows:
+            if item.get("id") != row_id: continue
+            item["classification"] = slugify(extracted.get("classification") or heuristic["classification"])
+            item["summary"] = (extracted.get("summary") or heuristic["summary"]).strip()[:240]
+            item["tokens"] = " ".join(extracted.get("tags") or heuristic["tags"])
+            item["slug"] = slugify(extracted.get("slug") or heuristic["slug"])
+            item["source"] = source
+            break
+        write_rows(rows)
+        NORMAL_SCAN_STATE[row_id] = {"state": "complete", "error": ""}
+    except Exception as exc:
+        log.exception("Normal pipeline rerun failed for %s", row_id)
+        NORMAL_SCAN_STATE[row_id] = {"state": "error", "error": str(exc)}
+
 def run_llm_rerun(row_ids):
     LLM_RERUN_STATE.update(state="running", current=0, total=len(row_ids), error="")
     try:
@@ -377,7 +404,7 @@ def api_index():
     tag_rows = [row for row in searched if not years or row.get("year") in years]
     counts = Counter(tag for row in tag_rows for tag in row_tags(row))
     files.sort(key=lambda row: (row.get("date", ""), row.get("stored_path", "")), reverse=True)
-    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [{**row, "name": Path(row.get("stored_path", "")).name, "inferred_tags": inferred_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "full_scan": FULL_SCAN_STATE.get(row.get("id"), {})} for row in files]})
+    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [{**row, "name": Path(row.get("stored_path", "")).name, "inferred_tags": inferred_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})} for row in files]})
 
 @app.post("/api/file/<row_id>")
 def update_file(row_id):
@@ -413,6 +440,13 @@ def full_scan_file(row_id):
     if FULL_SCAN_STATE.get(row_id, {}).get("state") == "running": return jsonify({"started": False, "message": "Full scan already running."}), 409
     if not any(row.get("id") == row_id for row in read_rows()): abort(404)
     threading.Thread(target=run_full_scan, args=(row_id,), daemon=True).start()
+    return jsonify({"started": True})
+
+@app.post("/api/file/<row_id>/rerun-pipeline")
+def rerun_file_pipeline(row_id):
+    if NORMAL_SCAN_STATE.get(row_id, {}).get("state") == "running": return jsonify({"started": False, "message": "Pipeline is already running."}), 409
+    if not any(row.get("id") == row_id for row in read_rows()): abort(404)
+    threading.Thread(target=run_normal_pipeline, args=(row_id,), daemon=True).start()
     return jsonify({"started": True})
 
 @app.route("/api/status")
