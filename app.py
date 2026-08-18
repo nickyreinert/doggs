@@ -282,6 +282,16 @@ def combined_tags(heuristic, extracted, text):
     extra = relevant_ai_tags(extracted.get("tags", []), text)
     return list(dict.fromkeys(base + extra))
 
+def replace_extracted_result(row, heuristic, extracted, text):
+    """Replace generated fields only; the user's manual `tags` field is immutable here."""
+    tags = combined_tags(heuristic, extracted, text)
+    row["classification"] = slugify(heuristic["classification"] if heuristic["classification"] != "document" else extracted.get("classification") or "document")
+    row["summary"] = (heuristic["summary"] if heuristic["classification"] == "invoice" else extracted.get("summary") or heuristic["summary"]).strip()[:240]
+    row["tokens"] = " ".join(tags)
+    row["removed_tags"] = ""
+    row["slug"] = slugify("-".join(tags[:3]) or heuristic["slug"])
+    return row
+
 def ai_extract(text):
     if AI_MODE != "ollama" or len(text.strip()) < 20: return {}
     prompt = read_settings()["prompts"]["metadata"]
@@ -362,15 +372,10 @@ def run_normal_pipeline(row_id):
         text, source = (row.get("ocr_text", ""), "saved-ocr") if row.get("ocr_text", "").strip() else extract_normal_text(path)
         analysis = f"{metadata} {text}".strip()
         heuristic, extracted = heuristic_extract(analysis, path.name), ai_extract(analysis)
-        tags = combined_tags(heuristic, extracted, analysis)
         rows = read_rows()
         for item in rows:
             if item.get("id") != row_id: continue
-            item["classification"] = slugify(heuristic["classification"] if heuristic["classification"] != "document" else extracted.get("classification") or "document")
-            item["summary"] = (heuristic["summary"] if heuristic["classification"] == "invoice" else extracted.get("summary") or heuristic["summary"]).strip()[:240]
-            item["tokens"] = " ".join(tags)
-            item["removed_tags"] = ""
-            item["slug"] = slugify("-".join(tags[:3]) or heuristic["slug"])
+            replace_extracted_result(item, heuristic, extracted, analysis)
             item["source"] = source
             break
         write_rows(rows)
@@ -390,10 +395,7 @@ def run_llm_rerun(row_ids):
                     metadata = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
                 text, _ = extract_normal_text(file_path_for_row(row)); analysis = f"{metadata} {text}".strip()
                 heuristic, extracted = heuristic_extract(analysis, Path(row["stored_path"]).name), ai_extract(analysis)
-                tags = combined_tags(heuristic, extracted, analysis)
-                row["classification"] = slugify(heuristic["classification"] if heuristic["classification"] != "document" else extracted.get("classification") or row["classification"])
-                row["summary"] = heuristic["summary"] if heuristic["classification"] == "invoice" else extracted.get("summary") or heuristic["summary"] or row["summary"]
-                row["tokens"] = " ".join(tags); row["removed_tags"] = ""; row["slug"] = slugify("-".join(tags[:3]) or heuristic["slug"])
+                replace_extracted_result(row, heuristic, extracted, analysis)
                 write_rows(rows)
             LLM_RERUN_STATE["current"] += 1
         LLM_RERUN_STATE["state"] = "complete"
@@ -555,8 +557,10 @@ def add_file_tag(row_id):
 def remove_file_tag(row_id, tag):
     tag = slugify(tag); rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
     if not row: abort(404)
-    row["tags"] = " ".join(value for value in custom_tags(row) if value != tag)
-    row["removed_tags"] = " ".join(dict.fromkeys(tag_values(row.get("removed_tags", "")) + [tag]))
+    if request.args.get("kind") == "custom":
+        row["tags"] = " ".join(value for value in custom_tags(row) if value != tag)
+    else:
+        row["removed_tags"] = " ".join(dict.fromkeys(tag_values(row.get("removed_tags", "")) + [tag]))
     write_rows(rows)
     return jsonify({"ok": True, "tags": document_tags(row)})
 
