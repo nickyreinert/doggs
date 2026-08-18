@@ -487,14 +487,16 @@ def index(): return render_template("index.html")
 
 @app.route("/api/index")
 def api_index():
-    query = request.args.get("q", "").strip(); years = set(filter(None, request.args.get("years", "").split(","))); tokens = set(filter(None, request.args.get("tokens", "").split(","))); duplicates = request.args.get("duplicates") == "1"; rows = read_rows()
+    query = request.args.get("q", "").strip(); years = set(filter(None, request.args.get("years", "").split(","))); tokens = set(filter(None, request.args.get("tokens", "").split(","))); selected_id = request.args.get("document", "").strip(); duplicates = request.args.get("duplicates") == "1"; rows = read_rows()
     duplicate_hashes = {value for value, count in Counter(row.get("file_hash") for row in rows if row.get("file_hash")).items() if count > 1}
     searched = search_rows(rows, query); files = [row for row in searched if (not years or row.get("year") in years) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
     year_rows = [row for row in searched if (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
     tag_rows = [row for row in searched if (not years or row.get("year") in years) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
     counts = Counter(tag for row in tag_rows for tag in row_tags(row))
     files.sort(key=lambda row: (row.get("date", ""), row.get("stored_path", "")), reverse=True)
-    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [{**row, "name": Path(row.get("stored_path", "")).name, "document_tags": document_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "ocr_scan": OCR_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})} for row in files]})
+    def serialize(row): return {**row, "name": Path(row.get("stored_path", "")).name, "document_tags": document_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "ocr_scan": OCR_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})}
+    selected_row = next((row for row in rows if row.get("id") == selected_id), None)
+    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [serialize(row) for row in files], "selected_file": serialize(selected_row) if selected_row else None})
 
 @app.post("/api/file/<row_id>")
 def update_file(row_id):
