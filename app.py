@@ -360,6 +360,8 @@ def scan_incoming():
         source_paths = INCOMING_DIR.rglob("*") if RECURSIVE_SCAN else INCOMING_DIR.iterdir()
         candidates = sorted((p for p in source_paths if p.is_file() and p.suffix.lower() == ".pdf" and not any(is_within(directory, p) for directory in managed_dirs)), key=lambda p: p.stat().st_mtime)
         for path in candidates:
+            if PIPELINE_STATE["paused"]:
+                break
             if not is_stable(path):
                 continue
             PIPELINE_STATE["processing"] = path.name
