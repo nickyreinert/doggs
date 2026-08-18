@@ -573,8 +573,9 @@ def full_scan_file(row_id):
 
 @app.post("/api/file/<row_id>/rerun-pipeline")
 def rerun_file_pipeline(row_id):
-    if NORMAL_SCAN_STATE.get(row_id, {}).get("state") == "running": return jsonify({"started": False, "message": "Pipeline is already running."}), 409
+    if NORMAL_SCAN_STATE.get(row_id, {}).get("state") in {"queued", "running"}: return jsonify({"started": False, "message": "Pipeline is already running."}), 409
     if not any(row.get("id") == row_id for row in read_rows()): abort(404)
+    NORMAL_SCAN_STATE[row_id] = {"state": "queued", "error": ""}
     threading.Thread(target=run_normal_pipeline, args=(row_id,), daemon=True).start()
     return jsonify({"started": True})
 
