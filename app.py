@@ -50,7 +50,7 @@ AI_MODE, OLLAMA_URL = os.getenv("AI_MODE", "ollama"), os.getenv("OLLAMA_URL", "h
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:3b")
 DATE_DAYFIRST = os.getenv("DATE_DAYFIRST", "1") == "1"
 MAX_TOKEN_FACETS = int(os.getenv("MAX_TOKEN_FACETS", "80"))
-FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "summary", "tokens", "tags", "is_duplicate", "duplicate_of", "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer", "source", "created_at"]
+FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "summary", "tokens", "removed_tags", "tags", "is_duplicate", "duplicate_of", "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer", "source", "created_at"]
 STOP_TAGS = {"the", "and", "for", "doc", "document", "pdf", "misc", "unknown", "fpdf", "pdflib", "printer", "linux", "php", "kunde", "page", "pages", "creator", "producer"}
 CLASSIFICATION_RULES = [("invoice", ["invoice", "rechnung", "billing", "amount due", "zahlung"]), ("bank", ["bank statement", "kontoauszug", "iban", "balance", "transaction"]), ("insurance", ["insurance", "versicherung", "policy", "claim", "premium"]), ("contract", ["contract", "agreement", "vertrag", "terms"]), ("tax", ["tax", "steuer", "finanzamt", "vat"]), ("medical", ["medical", "arzt", "doctor", "patient"]), ("utility", ["electricity", "gas", "water", "internet", "phone"]), ("salary", ["salary", "payroll", "gehalt", "lohn"]), ("official", ["authority", "bescheid", "government", "court"]), ("receipt", ["receipt", "quittung", "purchase"])]
 
@@ -124,10 +124,14 @@ def save_ignored_tags(tags):
 
 def inferred_tags(row):
     stored = tag_values(row.get("tokens", ""))
-    return [tag for tag in (stored or tag_values(row.get("slug", ""))) if tag not in STOP_TAGS and tag not in ignored_tags()]
+    removed = set(tag_values(row.get("removed_tags", "")))
+    return [tag for tag in (stored or tag_values(row.get("slug", ""))) if tag not in STOP_TAGS and tag not in ignored_tags() and tag not in removed]
 
 def custom_tags(row): return tag_values(row.get("tags", ""))
 def row_tags(row): return set(inferred_tags(row) + custom_tags(row))
+def document_tags(row):
+    inferred, custom = inferred_tags(row), custom_tags(row)
+    return [{"value": tag, "kind": "inferred"} for tag in inferred if tag not in custom] + [{"value": tag, "kind": "custom"} for tag in custom]
 
 def unique_path(path):
     if not path.exists(): return path
@@ -200,6 +204,18 @@ def extract_visible_text(path):
         return re.sub(r"\s+", " ", text).strip()[:MAX_SOURCE_CHARS], source
     finally: doc.close()
 
+def extract_normal_text(path):
+    """Read complete native text from the first pages; OCR only when the PDF has no text layer."""
+    doc = fitz.open(path)
+    try:
+        text = "\n".join(doc.load_page(index).get_text("text") for index in range(min(len(doc), HEAD_PAGES))).strip()
+        source = "pdf-text"
+        if len(text) < OCR_TRIGGER_CHARS:
+            ocr = ocr_top_region(path, doc)
+            if ocr.strip(): text, source = f"{text}\n{ocr}".strip(), "ocr"
+        return re.sub(r"\s+", " ", text).strip()[:MAX_SOURCE_CHARS], source
+    finally: doc.close()
+
 def parse_text_date(text):
     for match in re.finditer(r"\b(\d{4})[-./](\d{1,2})[-./](\d{1,2})\b", text):
         if parsed := valid_date(*match.groups()): return parsed
@@ -227,6 +243,19 @@ def heuristic_extract(text, filename):
         summary = f"Rechnung{(' von ' + details) if details else ''}."
     else: summary = re.sub(r"\s+", " ", text).strip()[:220]
     return {"classification": classification, "slug": "-".join(tags[:3]) or slugify(Path(filename).stem).split("-")[0], "tags": tags, "summary": summary}
+
+def relevant_ai_tags(tags, text):
+    words = set(re.findall(r"[a-z0-9äöüß]+", text.lower()))
+    relevant = []
+    for tag in tag_values(tags):
+        parts = [part for part in tag.split("-") if part]
+        if parts and all(part in words for part in parts): relevant.append(tag)
+    return relevant
+
+def combined_tags(heuristic, extracted, text):
+    base = heuristic["tags"]
+    extra = relevant_ai_tags(extracted.get("tags", []), text)
+    return list(dict.fromkeys(base + extra))
 
 def ai_extract(text):
     if AI_MODE != "ollama" or len(text.strip()) < 20: return {}
@@ -289,15 +318,17 @@ def run_normal_pipeline(row_id):
         with fitz.open(path) as doc:
             pdf_metadata = extract_pdf_metadata(doc)
         metadata = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
-        text, source = extract_visible_text(path); analysis = f"{metadata} {text}".strip()
+        text, source = extract_normal_text(path); analysis = f"{metadata} {text}".strip()
         heuristic, extracted = heuristic_extract(analysis, path.name), ai_extract(analysis)
+        tags = combined_tags(heuristic, extracted, analysis)
         rows = read_rows()
         for item in rows:
             if item.get("id") != row_id: continue
-            item["classification"] = slugify(extracted.get("classification") or heuristic["classification"])
-            item["summary"] = (extracted.get("summary") or heuristic["summary"]).strip()[:240]
-            item["tokens"] = " ".join(extracted.get("tags") or heuristic["tags"])
-            item["slug"] = slugify(extracted.get("slug") or heuristic["slug"])
+            item["classification"] = slugify(heuristic["classification"] if heuristic["classification"] != "document" else extracted.get("classification") or "document")
+            item["summary"] = (heuristic["summary"] if heuristic["classification"] == "invoice" else extracted.get("summary") or heuristic["summary"]).strip()[:240]
+            item["tokens"] = " ".join(tags)
+            item["removed_tags"] = ""
+            item["slug"] = slugify("-".join(tags[:3]) or heuristic["slug"])
             item["source"] = source
             break
         write_rows(rows)
@@ -315,13 +346,13 @@ def run_llm_rerun(row_ids):
                 with fitz.open(file_path_for_row(row)) as doc:
                     pdf_metadata = extract_pdf_metadata(doc)
                     metadata = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
-                text, _ = extract_visible_text(file_path_for_row(row)); extracted = ai_extract(f"{metadata} {text}".strip())
-                if extracted:
-                    row["classification"] = slugify(extracted.get("classification") or row["classification"])
-                    row["summary"] = extracted.get("summary") or row["summary"]
-                    if extracted.get("tags"): row["tokens"] = " ".join(extracted["tags"])
-                    if extracted.get("slug"): row["slug"] = slugify(extracted["slug"])
-                    write_rows(rows)
+                text, _ = extract_normal_text(file_path_for_row(row)); analysis = f"{metadata} {text}".strip()
+                heuristic, extracted = heuristic_extract(analysis, Path(row["stored_path"]).name), ai_extract(analysis)
+                tags = combined_tags(heuristic, extracted, analysis)
+                row["classification"] = slugify(heuristic["classification"] if heuristic["classification"] != "document" else extracted.get("classification") or row["classification"])
+                row["summary"] = heuristic["summary"] if heuristic["classification"] == "invoice" else extracted.get("summary") or heuristic["summary"] or row["summary"]
+                row["tokens"] = " ".join(tags); row["removed_tags"] = ""; row["slug"] = slugify("-".join(tags[:3]) or heuristic["slug"])
+                write_rows(rows)
             LLM_RERUN_STATE["current"] += 1
         LLM_RERUN_STATE["state"] = "complete"
     except Exception as exc:
@@ -338,18 +369,18 @@ def process_file(path):
         with fitz.open(path) as doc:
             pdf_date = parse_pdf_date(doc)
             pdf_metadata = extract_pdf_metadata(doc)
-        text, source = extract_visible_text(path)
+        text, source = extract_normal_text(path)
     except Exception: raise
     metadata_text = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
     analysis_text = f"{metadata_text} {text}".strip()
     heuristics, ai = heuristic_extract(analysis_text, path.name), ai_extract(analysis_text)
     final_date = parse_any_date(ai.get("date")) or parse_text_date(analysis_text) or pdf_date or datetime.fromtimestamp(path.stat().st_mtime).date()
     classification = slugify(ai.get("classification") or heuristics["classification"])
-    inferred = ai.get("tags") or heuristics["tags"]
-    slug = slugify(ai.get("slug") or heuristics["slug"] or "-".join(inferred[:3]) or classification)
+    inferred = combined_tags(heuristics, ai, analysis_text)
+    slug = slugify("-".join(inferred[:3]) or heuristics["slug"] or classification)
     destination = unique_path(ARCHIVE_DIR / str(final_date.year) / f"{final_date.isoformat()}_{slug}.pdf"); destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(path), destination)
-    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "summary": (ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(inferred), "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
+    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "summary": (heuristics["summary"] if heuristics["classification"] == "invoice" else ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(inferred), "removed_tags": "", "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
     write_rows(rows); log.info("Archived %s", destination)
 
 def scan_incoming():
@@ -406,7 +437,7 @@ def api_index():
     tag_rows = [row for row in searched if not years or row.get("year") in years]
     counts = Counter(tag for row in tag_rows for tag in row_tags(row))
     files.sort(key=lambda row: (row.get("date", ""), row.get("stored_path", "")), reverse=True)
-    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [{**row, "name": Path(row.get("stored_path", "")).name, "inferred_tags": inferred_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})} for row in files]})
+    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [{**row, "name": Path(row.get("stored_path", "")).name, "document_tags": document_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})} for row in files]})
 
 @app.post("/api/file/<row_id>")
 def update_file(row_id):
@@ -436,6 +467,25 @@ def update_file(row_id):
         row["stored_path"] = destination.relative_to(base).as_posix()
     write_rows(rows)
     return jsonify({"ok": True, "tags": row["tags"], "summary": row["summary"], "year": row["year"], "name": Path(row["stored_path"]).name})
+
+@app.post("/api/file/<row_id>/tags")
+def add_file_tag(row_id):
+    tag = slugify(str((request.get_json(silent=True) or {}).get("tag", "")))
+    if tag == "document": abort(400, "Enter a tag.")
+    rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
+    if not row: abort(404)
+    row["tags"] = " ".join(dict.fromkeys(custom_tags(row) + [tag]))
+    write_rows(rows)
+    return jsonify({"ok": True, "tags": document_tags(row)})
+
+@app.delete("/api/file/<row_id>/tags/<tag>")
+def remove_file_tag(row_id, tag):
+    tag = slugify(tag); rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
+    if not row: abort(404)
+    row["tags"] = " ".join(value for value in custom_tags(row) if value != tag)
+    row["removed_tags"] = " ".join(dict.fromkeys(tag_values(row.get("removed_tags", "")) + [tag]))
+    write_rows(rows)
+    return jsonify({"ok": True, "tags": document_tags(row)})
 
 @app.post("/api/file/<row_id>/full-scan")
 def full_scan_file(row_id):
