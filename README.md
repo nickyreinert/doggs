@@ -133,7 +133,13 @@ Restart DOGGS after changing `.env`. Relative local paths are resolved from the 
 
 The footer reports Ollama connectivity, selected-model availability, and OCR-language readiness.
 
+For multiple Tesseract languages, use `+`, for example `OCR_LANG=deu+eng`. DOGGS also accepts the older comma form (`deu,eng`) and normalizes it automatically.
+
 By default, DOGGS scans only PDFs placed directly in `INCOMING_DIR`; subfolders are ignored. Set `RECURSIVE_SCAN=1` only when nested inbox folders are intentional.
+
+## Opening DOGGS from another device
+
+`HOST=0.0.0.0` means “listen on every network interface”; it is not an address to type into a browser. Open the LAN address shown by `run.sh`, for example `http://192.168.178.150:8383`. If that address still cannot be reached while DOGGS is running, allow incoming TCP port `8383` in the host or NAS firewall. For Docker, publish the port as well (for example, `-p 8383:8383`).
 
 ## Local AI with Ollama
 

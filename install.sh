@@ -22,6 +22,13 @@ load_env() {
   done < "$BASE_DIR/.env"
 }
 absolute_path() { [[ "$1" = /* ]] && printf '%s' "$1" || printf '%s/%s' "$BASE_DIR" "$1"; }
+open_address() {
+  local host="${HOST:-0.0.0.0}" port="${PORT:-8383}" lan=""
+  if [[ "$host" != "0.0.0.0" && "$host" != "::" ]]; then printf 'http://%s:%s' "$host" "$port"; return; fi
+  if command -v hostname >/dev/null 2>&1; then lan="$(hostname -I 2>/dev/null | awk '{print $1}')" || true; fi
+  if [[ -z "$lan" && "$(uname -s)" == "Darwin" ]] && command -v ipconfig >/dev/null 2>&1; then lan="$(ipconfig getifaddr en0 2>/dev/null || true)"; fi
+  if [[ -n "$lan" ]]; then printf 'http://%s:%s (or http://localhost:%s)' "$lan" "$port" "$port"; else printf 'http://localhost:%s (from another device, use its LAN IP)' "$port"; fi
+}
 ocr_language_installed() { command -v tesseract >/dev/null 2>&1 && tesseract --list-langs 2>/dev/null | tail -n +2 | grep -Fxq "$1"; }
 ensure_ocr_language() {
   local requested="$1" language package_list=() missing=()
@@ -125,10 +132,10 @@ if [[ "$SYSTEM" == true ]]; then
   ensure_ocr_language "$OCR_LANG"
   sudo useradd -r -s /usr/sbin/nologin doggs 2>/dev/null || true; sudo mkdir -p "$APP_DIR"; sudo cp -a "$BASE_DIR/." "$APP_DIR/"; sudo chown -R doggs:doggs "$APP_DIR"; sudo rm -rf "$APP_DIR/.venv"
   sudo -u doggs python3 -m venv "$APP_DIR/.venv"; sudo -u doggs "$APP_DIR/.venv/bin/pip" install -U pip; sudo -u doggs "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
-  sudo cp "$APP_DIR/doggs.service" /etc/systemd/system/doggs.service; sudo systemctl daemon-reload; sudo systemctl enable --now doggs; success "Installed. Open http://${HOST:-0.0.0.0}:${PORT:-8383}"
+  sudo cp "$APP_DIR/doggs.service" /etc/systemd/system/doggs.service; sudo systemctl daemon-reload; sudo systemctl enable --now doggs; success "Installed. Open $(open_address)"
 else
   command -v python3 >/dev/null || { error "python3 is required."; exit 1; }; heading "Installing local application"; python3 -m venv "$APP_DIR/.venv"; "$APP_DIR/.venv/bin/pip" install -U pip; "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
-  load_env; ensure_ocr_language "$OCR_LANG"; mkdir -p "$(absolute_path "$INCOMING_DIR")" "$(absolute_path "$ARCHIVE_DIR")" "$(absolute_path "$DATA_DIR")" "$(absolute_path "$ERROR_DIR")" "$(absolute_path "$DUPLICATE_DIR")"; success "Installed. Start with ./run.sh, then open http://${HOST}:${PORT}"
+  load_env; ensure_ocr_language "$OCR_LANG"; mkdir -p "$(absolute_path "$INCOMING_DIR")" "$(absolute_path "$ARCHIVE_DIR")" "$(absolute_path "$DATA_DIR")" "$(absolute_path "$ERROR_DIR")" "$(absolute_path "$DUPLICATE_DIR")"; success "Installed. Start with ./run.sh, then open $(open_address)"
 fi
 if [[ "$INSTALL_OLLAMA" == true ]]; then
   heading "Installing Ollama"

@@ -39,7 +39,9 @@ DUPLICATE_DIR = configured_path("DUPLICATE_DIR", BASE_DIR / "duplicates")
 HOST, PORT = os.getenv("HOST", "0.0.0.0"), int(os.getenv("PORT", "8383"))
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "300"))
 RECURSIVE_SCAN = os.getenv("RECURSIVE_SCAN", "0") == "1"
-OCR_LANG, OCR_DPI = os.getenv("OCR_LANG", "eng"), int(os.getenv("OCR_DPI", "200"))
+OCR_LANG = re.sub(r"[,\s]+", "+", os.getenv("OCR_LANG", "eng").strip()).strip("+") or "eng"
+OCR_LANGS = tuple(language for language in OCR_LANG.split("+") if language)
+OCR_DPI = int(os.getenv("OCR_DPI", "200"))
 TOP_REGION_FRACTION, HEAD_PAGES = float(os.getenv("TOP_REGION_FRACTION", "0.25")), int(os.getenv("HEAD_PAGES", "2"))
 OCR_TRIGGER_CHARS, MAX_SOURCE_CHARS = int(os.getenv("OCR_TRIGGER_CHARS", "80")), int(os.getenv("MAX_SOURCE_CHARS", "3000"))
 MAX_TEXT_CHARS, MAX_FULL_TEXT_CHARS, AI_TIMEOUT = int(os.getenv("MAX_TEXT_CHARS", "300")), int(os.getenv("MAX_FULL_TEXT_CHARS", "12000")), int(os.getenv("AI_TIMEOUT", "60"))
@@ -408,7 +410,7 @@ def api_status():
         "model_available": AI_MODEL in available,
         "error": error,
         "ocr_language": OCR_LANG,
-        "ocr_available": OCR_LANG in ocr_languages,
+        "ocr_available": all(language in ocr_languages for language in OCR_LANGS),
         "pipeline": {"waiting": waiting[:30], "waiting_count": len(waiting), **PIPELINE_STATE},
         "llm_rerun": LLM_RERUN_STATE,
     }
