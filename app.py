@@ -113,7 +113,8 @@ def sha256_file(path):
     return digest.hexdigest()
 
 def slugify(value):
-    value = re.sub(r"[^a-z0-9]+", "-", (value or "").strip().lower())
+    value = str(value or "").strip().lower().translate(str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"}))
+    value = re.sub(r"[^a-z0-9]+", "-", value)
     return re.sub(r"-{2,}", "-", value).strip("-")[:60].strip("-") or "document"
 
 def tag_values(value):
@@ -270,7 +271,7 @@ def heuristic_extract(text, filename):
     return {"classification": classification, "slug": "-".join(tags[:3]) or slugify(Path(filename).stem).split("-")[0], "tags": tags, "summary": summary}
 
 def relevant_ai_tags(tags, text):
-    words = set(re.findall(r"[a-z0-9äöüß]+", text.lower()))
+    words = {slugify(word) for word in re.findall(r"[a-z0-9äöüß]+", text.lower())}
     relevant = []
     for tag in tag_values(tags):
         parts = [part for part in tag.split("-") if part]
