@@ -19,7 +19,10 @@ git -C "$BASE_DIR" fetch origin main
 echo "[UPDATE] Checking out the latest main…"
 git -C "$BASE_DIR" checkout main
 git -C "$BASE_DIR" reset --hard origin/main
-"$BASE_DIR/.venv/bin/pip" install -r "$BASE_DIR/requirements.txt"
+VENV_PIP="$BASE_DIR/.venv/bin/pip"
+[[ -x "$VENV_PIP" ]] || { echo "[ERROR] DOGGS virtual environment is missing. Run ./install.sh to repair this installation." >&2; exit 1; }
+echo "[UPDATE] Upgrading Python dependencies…"
+"$VENV_PIP" install --upgrade -r "$BASE_DIR/requirements.txt"
 if [[ "$SERVICE_ACTIVE" == true ]]; then
   echo "[UPDATE] Starting doggs.service…"
   sudo systemctl start doggs
