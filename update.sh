@@ -18,9 +18,13 @@ SERVICE_ACTIVE=false
 restore_service() { if [[ "$SERVICE_ACTIVE" == true ]]; then sudo systemctl start doggs || true; fi; }
 trap restore_service EXIT
 if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet doggs; then
-  echo "[UPDATE] Stopping doggs.service…"
-  sudo systemctl stop doggs
-  SERVICE_ACTIVE=true
+  if [[ -t 0 ]] || sudo -n true 2>/dev/null; then
+    echo "[UPDATE] Stopping doggs.service…"
+    sudo systemctl stop doggs
+    SERVICE_ACTIVE=true
+  else
+    echo "[NOTE] doggs.service is active but sudo would need an interactive password here; skipping the stop/restart. Files still update below — run this from a real terminal (not a non-interactive script) to also restart the service automatically, or restart it yourself afterwards." >&2
+  fi
 fi
 echo "[UPDATE] Fetching origin/main…"
 if [[ "$TARGET_DIR" == "/opt/doggs" ]]; then echo "[UPDATE] Updating the system-service deployment in /opt/doggs…"; sudo git -C "$TARGET_DIR" fetch origin main; else git -C "$TARGET_DIR" fetch origin main; fi
