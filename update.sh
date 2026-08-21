@@ -1,25 +1,22 @@
 #!/usr/bin/env bash
 # Update DOGGS to the latest remote main commit.
 set -euo pipefail
-if [[ -z "${DOGGS_REEXEC:-}" ]]; then
-  # Run from a private temp copy: this script's own `git reset --hard` below overwrites
-  # this very file in place, and reading a script while it changes on disk mid-execution
-  # is undefined behavior in bash (later commands can silently fail to run at all).
-  ORIG_DIR="$(cd "$(dirname "${BASH_SOURCE:-$0}")" && pwd)"
-  SELF_COPY="$(mktemp "${TMPDIR:-/tmp}/doggs-update.XXXXXX.sh")"
-  cp "${BASH_SOURCE:-$0}" "$SELF_COPY"
-  chmod +x "$SELF_COPY"
-  exec env DOGGS_REEXEC=1 DOGGS_ORIG_DIR="$ORIG_DIR" "$SELF_COPY" "$@"
-fi
-BASE_DIR="$DOGGS_ORIG_DIR"
+# Wrapping the whole script in `{ ... }` forces bash to fully parse this compound command
+# (up to the matching closing brace) before running anything inside it. That protects us
+# from this script's own `git reset --hard` overwriting the very file bash is reading
+# mid-execution — a real hazard on self-updating scripts (some commands could otherwise
+# silently never run). See the closing `}` + `exit` at the bottom of this file.
+{
+SCRIPT_PATH="${BASH_SOURCE:-$0}"
+BASE_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 REPOSITORY_URL="https://github.com/nickyreinert/doggs.git"
 command -v git >/dev/null || { echo "[ERROR] Git is required for updates." >&2; exit 1; }
 TARGET_DIR="$BASE_DIR"
 if [[ -f /etc/systemd/system/doggs.service ]] && [[ -d /opt/doggs/.git ]]; then TARGET_DIR="/opt/doggs"; fi
 git -C "$TARGET_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "[ERROR] This installation is not a Git checkout. Reinstall DOGGS with install.sh." >&2; exit 1; }
 SERVICE_ACTIVE=false
-cleanup() { if [[ "$SERVICE_ACTIVE" == true ]]; then sudo systemctl start doggs || true; fi; rm -f "${BASH_SOURCE:-$0}"; }
-trap cleanup EXIT
+restore_service() { if [[ "$SERVICE_ACTIVE" == true ]]; then sudo systemctl start doggs || true; fi; }
+trap restore_service EXIT
 if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet doggs; then
   echo "[UPDATE] Stopping doggs.service…"
   sudo systemctl stop doggs
@@ -61,3 +58,5 @@ if [[ "$SERVICE_ACTIVE" == true ]]; then
   SERVICE_ACTIVE=false
 fi
 echo "[OK] DOGGS now matches origin/main."
+}
+exit 0

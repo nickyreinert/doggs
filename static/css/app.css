@@ -120,23 +120,6 @@ html[data-theme="aurora"] .theme-card{background:#f3f4fd;border-color:#dfe1f6;co
 html[data-theme="aurora"] .theme-card.selected{border-color:#5b5bd6;background:#eceafd;box-shadow:0 0 0 1px #5b5bd6 inset}
 html[data-theme="aurora"] .theme-desc{color:#6c70a0}
 
-/* Layout: Sidebar - admin-dashboard style rearrangement (top bar + left filter rail + list + preview) */
-html[data-layout="sidebar"] body{display:grid;grid-template-columns:220px 330px minmax(0,1fr);grid-template-rows:auto auto auto 1fr auto;grid-template-areas:"brand brand brand" "years list preview" "search list preview" "tags list preview" "footer footer footer";height:100vh;overflow:hidden}
-html[data-layout="sidebar"] header{display:contents}
-html[data-layout="sidebar"] .header-grid{display:contents}
-html[data-layout="sidebar"] main{display:contents}
-html[data-layout="sidebar"] .header-resizer{display:none}
-html[data-layout="sidebar"] .brand{grid-area:brand;margin:0;padding:10px 18px;background:var(--surface);border-bottom:1px solid var(--line)}
-html[data-layout="sidebar"] .year-panel{grid-area:years;padding:12px 16px 8px;background:var(--surface);border-bottom:1px solid var(--line);border-right:1px solid var(--line)}
-html[data-layout="sidebar"] .search-panel{grid-area:search;padding:8px 16px;background:var(--surface);border-bottom:1px solid var(--line);border-right:1px solid var(--line)}
-html[data-layout="sidebar"] .tag-panel{grid-area:tags;display:flex;flex-direction:column;min-height:0;padding:12px 16px;background:var(--surface);border-right:1px solid var(--line)}
-html[data-layout="sidebar"] .tag-row{flex:1;min-height:0}
-html[data-layout="sidebar"] #tags{max-height:none}
-html[data-layout="sidebar"] aside{grid-area:list;min-height:0}
-html[data-layout="sidebar"] #preview{grid-area:preview;min-height:0}
-html[data-layout="sidebar"] footer{grid-area:footer}
-@media(max-width:960px){html[data-layout="sidebar"] body{grid-template-columns:1fr;grid-template-rows:auto auto auto auto auto auto auto;grid-template-areas:"brand" "years" "search" "tags" "list" "preview" "footer";height:auto;overflow:visible}html[data-layout="sidebar"] .year-panel,html[data-layout="sidebar"] .search-panel,html[data-layout="sidebar"] .tag-panel{border-right:0}}
-
 /* Layout: Tabler - structural grid placement only; visuals come from the real @tabler/core CSS (enabled via #tablerStylesheet, fetched by install.sh/update.sh) plus the navbar/card/btn/form-control classes added in the markup */
 html[data-layout="tabler"] body{display:grid;grid-template-columns:220px 330px minmax(0,1fr);grid-template-rows:auto auto auto 1fr auto;grid-template-areas:"brand brand brand" "years list preview" "search list preview" "tags list preview" "footer footer footer";height:100vh;overflow:hidden}
 html[data-layout="tabler"] header{display:contents}
