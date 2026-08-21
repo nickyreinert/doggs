@@ -71,13 +71,19 @@ function renderTags(items) {
     filter.textContent = i.value + ' (' + i.count + ')';
     filter.title = 'Filter by ' + i.value;
     filter.onclick = () => { state.tags.has(i.value) ? state.tags.delete(i.value) : state.tags.add(i.value); syncUrl(true); refresh() };
+    const edit = document.createElement('button');
+    edit.className = 'tag-edit';
+    edit.textContent = '✎';
+    edit.title = 'Rename ' + i.value + ' everywhere';
+    edit.setAttribute('aria-label', 'Rename ' + i.value + ' everywhere');
+    edit.onclick = () => renameTag(i.value);
     const ignore = document.createElement('button');
     ignore.className = 'tag-ignore';
     ignore.textContent = '−';
     ignore.title = 'Ignore ' + i.value + ' everywhere';
     ignore.setAttribute('aria-label', 'Ignore ' + i.value + ' everywhere');
     ignore.onclick = () => ignoreTag(i.value);
-    wrap.append(filter, ignore);
+    wrap.append(filter, edit, ignore);
     e.append(wrap);
   });
   if (!e.children.length) e.innerHTML = '<div class="empty">No matching tags.</div>';
@@ -240,6 +246,15 @@ async function ignoreTag(tag) {
   await fetch('/api/tags/' + encodeURIComponent(tag) + '/ignore', { method: 'POST' });
   $('editorStatus').textContent = 'Tag ignored everywhere.';
   refresh();
+}
+
+// Renaming a tag to a canonical value merges it into that tag everywhere (e.g. two spellings can both become one tag).
+async function renameTag(tag) {
+  const canonical = prompt('Rename "' + tag + '" to (this renames/merges it everywhere):', tag);
+  if (!canonical || !canonical.trim() || canonical.trim() === tag) return;
+  const r = await fetch('/api/tags/' + encodeURIComponent(tag) + '/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ canonical: canonical.trim() }) });
+  if (r.ok) { $('editorStatus').textContent = 'Tag renamed everywhere.'; refresh() }
+  else $('editorStatus').textContent = 'Could not rename tag.';
 }
 
 function filterByDocumentTag(tag) {
@@ -418,7 +433,6 @@ $('tagInput').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); ad
 $('duplicates').onchange = e => { state.duplicates = e.target.checked; syncUrl(true); refresh() };
 $('saveDetails').onclick = saveDetails;
 $('yearInput').onchange = moveDocumentYear;
-$('metaToggle').onclick = () => $('metaPanel').hidden = !$('metaPanel').hidden;
 $('runOcr').onclick = runOcr;
 $('runLlm').onclick = rerunPipeline;
 $('saveOcr').onclick = saveOcr;

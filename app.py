@@ -150,7 +150,8 @@ def read_settings():
     if metadata_prompt == LEGACY_METADATA_PROMPT:
         metadata_prompt = DEFAULT_METADATA_PROMPT
     times = [value for value in schedule.get("daily_times", []) if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(value))]
-    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "prompts": {"metadata": metadata_prompt, "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
+    aliases = {slugify(key): slugify(value) for key, value in (data.get("tag_aliases") or {}).items() if slugify(key) and slugify(value) and slugify(key) != slugify(value)}
+    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "tag_aliases": aliases, "prompts": {"metadata": metadata_prompt, "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
 
 def write_settings(settings):
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -161,12 +162,32 @@ def ignored_tags(): return set(read_settings()["ignored_tags"])
 def save_ignored_tags(tags):
     settings = read_settings(); settings["ignored_tags"] = sorted(set(tag_values(tags))); write_settings(settings)
 
-def inferred_tags(row):
-    stored = tag_values(row.get("tokens", ""))
-    removed = set(tag_values(row.get("removed_tags", "")))
-    return [tag for tag in (stored or tag_values(row.get("slug", ""))) if tag not in STOP_TAGS and tag not in ignored_tags() and tag not in removed]
+def tag_aliases(): return read_settings()["tag_aliases"]
 
-def custom_tags(row): return tag_values(row.get("tags", ""))
+def canonical_tag(tag, aliases=None):
+    """Resolve a tag through the rename/merge alias chain to its canonical value."""
+    aliases = tag_aliases() if aliases is None else aliases
+    seen = set()
+    while tag in aliases and tag not in seen:
+        seen.add(tag); tag = aliases[tag]
+    return tag
+
+def save_tag_alias(tag, canonical):
+    tag, canonical = slugify(tag), slugify(canonical)
+    if not tag or not canonical or tag == canonical: return
+    settings = read_settings(); settings["tag_aliases"][tag] = canonical; write_settings(settings)
+
+def inferred_tags(row):
+    aliases = tag_aliases()
+    ignored = {canonical_tag(tag, aliases) for tag in ignored_tags()}
+    removed = {canonical_tag(tag, aliases) for tag in tag_values(row.get("removed_tags", ""))}
+    base = tag_values(row.get("tokens", "")) or tag_values(row.get("slug", ""))
+    tags = (canonical_tag(tag, aliases) for tag in base)
+    return list(dict.fromkeys(tag for tag in tags if tag not in STOP_TAGS and tag not in ignored and tag not in removed))
+
+def custom_tags(row):
+    aliases = tag_aliases()
+    return list(dict.fromkeys(canonical_tag(tag, aliases) for tag in tag_values(row.get("tags", ""))))
 def row_tags(row): return set(inferred_tags(row) + custom_tags(row))
 def document_tags(row):
     inferred, custom = inferred_tags(row), custom_tags(row)
@@ -705,6 +726,14 @@ def settings():
 def ignore_tag(tag):
     save_ignored_tags(list(ignored_tags()) + [tag])
     return jsonify({"ignored_tags": sorted(ignored_tags())})
+
+@app.post("/api/tags/<tag>/rename")
+def rename_tag(tag):
+    """Rename a tag to a canonical value everywhere; renaming two tags to the same value merges them."""
+    canonical = str((request.get_json(silent=True) or {}).get("canonical", "")).strip()
+    if not slugify(canonical): abort(400, "Enter a valid tag name.")
+    save_tag_alias(tag, canonical)
+    return jsonify({"tag_aliases": tag_aliases()})
 
 @app.post("/api/rerun-llm")
 def api_rerun_llm():
