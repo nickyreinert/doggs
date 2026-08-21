@@ -126,6 +126,7 @@ function clearSelection(updateUrl = true) {
   state.selected = null;
   state.requestedDocument = '';
   $('detailsEditor').hidden = true;
+  $('editorActions').hidden = true;
   $('documentTitle').textContent = 'Select a document';
   $('documentMeta').textContent = 'Its details and preview will appear here.';
   $('frame').removeAttribute('src');
@@ -173,6 +174,7 @@ function selectFile(f, load = true, updateUrl = true) {
   state.selected = f;
   state.requestedDocument = '';
   $('detailsEditor').hidden = false;
+  $('editorActions').hidden = false;
   $('documentTitle').textContent = f.pdf_title || f.name;
   $('documentMeta').textContent = [f.name, f.pdf_author, f.date, f.classification, f.is_duplicate ? 'Duplicate content' : ''].filter(Boolean).join(' • ');
   $('tagInput').value = '';
@@ -299,6 +301,7 @@ function renderDuplicatesGrid(list) {
   state.selected = null;
   state.requestedDocument = '';
   $('detailsEditor').hidden = true;
+  $('editorActions').hidden = true;
   $('frame').removeAttribute('src');
   $('frame').hidden = true;
   $('documentTitle').textContent = 'Duplicate documents (' + list.length + ')';
