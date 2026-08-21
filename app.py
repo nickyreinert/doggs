@@ -527,7 +527,11 @@ def index(): return render_template("index.html")
 
 @app.route("/api/index")
 def api_index():
-    query = request.args.get("q", "").strip(); years = set(filter(None, request.args.get("years", "").split(","))); tokens = set(filter(None, request.args.get("tokens", "").split(","))); selected_id = request.args.get("document", "").strip(); duplicates = request.args.get("duplicates") == "1"; rows = read_rows()
+    query = request.args.get("q", "").strip(); years = set(filter(None, request.args.get("years", "").split(","))); duplicates = request.args.get("duplicates") == "1"; rows = read_rows()
+    # Requested tokens may reference a tag that was since renamed/merged; resolve them to their current canonical value.
+    aliases = tag_aliases()
+    tokens = {canonical_tag(token, aliases) for token in filter(None, request.args.get("tokens", "").split(","))}
+    selected_id = request.args.get("document", "").strip()
     duplicate_hashes = {value for value, count in Counter(row.get("file_hash") for row in rows if row.get("file_hash")).items() if count > 1}
     searched = search_rows(rows, query); files = [row for row in searched if (not years or row.get("year") in years) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
     year_rows = [row for row in searched if (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]

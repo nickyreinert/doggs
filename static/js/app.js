@@ -252,9 +252,16 @@ async function ignoreTag(tag) {
 async function renameTag(tag) {
   const canonical = prompt('Rename "' + tag + '" to (this renames/merges it everywhere):', tag);
   if (!canonical || !canonical.trim() || canonical.trim() === tag) return;
-  const r = await fetch('/api/tags/' + encodeURIComponent(tag) + '/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ canonical: canonical.trim() }) });
-  if (r.ok) { $('editorStatus').textContent = 'Tag renamed everywhere.'; refresh() }
-  else $('editorStatus').textContent = 'Could not rename tag.';
+  const target = canonical.trim();
+  const r = await fetch('/api/tags/' + encodeURIComponent(tag) + '/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ canonical: target }) });
+  if (r.ok) {
+    // Keep an active filter on this tag pointed at its new name instead of the now-renamed value.
+    if (state.tags.has(tag)) { state.tags.delete(tag); state.tags.add(target); syncUrl(true) }
+    $('editorStatus').textContent = 'Tag renamed everywhere.';
+    refresh();
+  } else {
+    $('editorStatus').textContent = 'Could not rename tag.';
+  }
 }
 
 function filterByDocumentTag(tag) {
