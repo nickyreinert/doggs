@@ -154,7 +154,7 @@ def read_settings():
     aliases = {slugify(key): slugify(value) for key, value in (data.get("tag_aliases") or {}).items() if slugify(key) and slugify(value) and slugify(key) != slugify(value)}
     raw_general = data.get("general")
     general = {**current_general_defaults(), **(raw_general or {})}
-    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "tag_aliases": aliases, "general": general, "general_configured": raw_general is not None, "general_locked": general_locked_fields(), "prompts": {"metadata": metadata_prompt, "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
+    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "tag_aliases": aliases, "general": general, "general_configured": general_is_configured(raw_general), "general_locked": general_locked_fields(), "prompts": {"metadata": metadata_prompt, "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
 
 def write_settings(settings):
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -165,6 +165,14 @@ GENERAL_ENV_MAP = {"incoming_dir": "INCOMING_DIR", "archive_dir": "ARCHIVE_DIR",
 def general_locked_fields():
     """Fields whose environment variable is explicitly set can't be overridden from the UI."""
     return {key: True for key, env_name in GENERAL_ENV_MAP.items() if env_name in os.environ}
+
+STORAGE_DIR_KEYS = ("incoming_dir", "archive_dir", "error_dir", "duplicate_dir", "trash_dir")
+
+def general_is_configured(raw_general):
+    """True once storage folders are set, either saved via the UI or locked via .env."""
+    if raw_general is not None: return True
+    locked = general_locked_fields()
+    return all(locked.get(key) for key in STORAGE_DIR_KEYS)
 
 def current_general_defaults():
     return {"incoming_dir": str(INCOMING_DIR), "archive_dir": str(ARCHIVE_DIR), "error_dir": str(ERROR_DIR), "duplicate_dir": str(DUPLICATE_DIR), "trash_dir": str(TRASH_DIR), "recursive_scan": RECURSIVE_SCAN, "ocr_lang": OCR_LANG, "ai_mode": AI_MODE, "ollama_url": OLLAMA_URL, "ai_model": AI_MODEL}
