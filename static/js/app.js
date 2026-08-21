@@ -10,12 +10,19 @@ function applyTheme(name) {
   document.querySelectorAll('[data-theme-choice]').forEach(card => card.classList.toggle('selected', card.dataset.themeChoice === name));
 }
 
+let tablerCssFailed = false;
 function applyLayout(name) {
+  if (name === 'tabler' && tablerCssFailed) name = 'classic';
   document.documentElement.dataset.layout = name;
   $('tablerStylesheet').disabled = name !== 'tabler';
   try { localStorage.setItem(LAYOUT_KEY, name) } catch {}
   document.querySelectorAll('[data-layout-choice]').forEach(card => card.classList.toggle('selected', card.dataset.layoutChoice === name));
 }
+// The vendored CSS is fetched by install.sh/update.sh, not committed — fall back if it's missing.
+$('tablerStylesheet').addEventListener('error', () => {
+  tablerCssFailed = true;
+  if (document.documentElement.dataset.layout === 'tabler') applyLayout('classic');
+});
 
 function syncUrl(push = false) {
   const p = new URLSearchParams();
