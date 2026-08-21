@@ -136,3 +136,20 @@ html[data-layout="sidebar"] aside{grid-area:list;min-height:0}
 html[data-layout="sidebar"] #preview{grid-area:preview;min-height:0}
 html[data-layout="sidebar"] footer{grid-area:footer}
 @media(max-width:960px){html[data-layout="sidebar"] body{grid-template-columns:1fr;grid-template-rows:auto auto auto auto auto auto auto;grid-template-areas:"brand" "years" "search" "tags" "list" "preview" "footer";height:auto;overflow:visible}html[data-layout="sidebar"] .year-panel,html[data-layout="sidebar"] .search-panel,html[data-layout="sidebar"] .tag-panel{border-right:0}}
+
+/* Layout: Tabler - structural grid placement only; visuals come from the real @tabler/core CSS (enabled via #tablerStylesheet, fetched by install.sh/update.sh) plus the navbar/card/btn/form-control classes added in the markup */
+html[data-layout="tabler"] body{display:grid;grid-template-columns:220px 330px minmax(0,1fr);grid-template-rows:auto auto auto 1fr auto;grid-template-areas:"brand brand brand" "years list preview" "search list preview" "tags list preview" "footer footer footer";height:100vh;overflow:hidden}
+html[data-layout="tabler"] header{display:contents}
+html[data-layout="tabler"] .header-grid{display:contents}
+html[data-layout="tabler"] main{display:contents}
+html[data-layout="tabler"] .header-resizer{display:none}
+html[data-layout="tabler"] .brand{grid-area:brand;margin:0;padding:.5rem 1rem}
+html[data-layout="tabler"] .year-panel{grid-area:years;margin:12px 12px 6px}
+html[data-layout="tabler"] .search-panel{grid-area:search;margin:6px 12px}
+html[data-layout="tabler"] .tag-panel{grid-area:tags;display:flex;flex-direction:column;min-height:0;margin:6px 12px 12px}
+html[data-layout="tabler"] .tag-row{flex:1;min-height:0}
+html[data-layout="tabler"] #tags{max-height:none}
+html[data-layout="tabler"] aside{grid-area:list;min-height:0;margin:12px 12px 12px 0;overflow:auto}
+html[data-layout="tabler"] #preview{grid-area:preview;min-height:0;margin:12px 12px 12px 0;overflow:auto}
+html[data-layout="tabler"] footer{grid-area:footer}
+@media(max-width:960px){html[data-layout="tabler"] body{grid-template-columns:1fr;grid-template-rows:auto auto auto auto auto auto auto;grid-template-areas:"brand" "years" "search" "tags" "list" "preview" "footer";height:auto;overflow:visible}}

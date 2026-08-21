@@ -54,6 +54,20 @@ ensure_ocr_language() {
   for language in "${missing[@]}"; do ocr_language_installed "$language" || { error "Tesseract language '$language' could not be verified after installation."; exit 1; }; done
   success "Tesseract language(s) '$requested' are available."
 }
+TABLER_VERSION="1.4.0"
+fetch_tabler_css() {
+  local app_dir="$1" target_dir target_file url
+  target_dir="$app_dir/static/vendor/tabler/css"; target_file="$target_dir/tabler.min.css"
+  url="https://cdn.jsdelivr.net/npm/@tabler/core@${TABLER_VERSION}/dist/css/tabler.min.css"
+  mkdir -p "$target_dir"
+  if command -v curl >/dev/null 2>&1 && curl -fsSL "$url" -o "$target_file.tmp"; then
+    mv "$target_file.tmp" "$target_file"
+    success "Fetched Tabler CSS v$TABLER_VERSION (optional 'Tabler' layout)."
+  else
+    rm -f "$target_file.tmp"
+    warning "Could not download Tabler CSS (offline?). The 'Tabler' layout option will look unstyled until static/vendor/tabler/css/tabler.min.css is fetched — rerun update.sh once online."
+  fi
+}
 install_ollama() {
   if command -v ollama >/dev/null 2>&1; then success "Ollama is available."; return; fi
   if [[ "$(uname -s)" == "Linux" ]]; then
@@ -132,11 +146,13 @@ if [[ "$SYSTEM" == true ]]; then
   sudo apt-get update; sudo apt-get install -y curl git python3 python3-venv python3-pip
   ensure_ocr_language "$OCR_LANG"
   sudo mkdir -p "$APP_DIR"; sudo cp -a "$BASE_DIR/." "$APP_DIR/"; sudo chown -R "$SERVICE_USER:$SERVICE_GROUP" "$APP_DIR"; sudo rm -rf "$APP_DIR/.venv"
+  fetch_tabler_css "$APP_DIR"
   sudo -u "$SERVICE_USER" python3 -m venv "$APP_DIR/.venv"; sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/pip" install -U pip; sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
   sed "s/__DOGGS_SERVICE_USER__/$SERVICE_USER/g;s/__DOGGS_SERVICE_GROUP__/$SERVICE_GROUP/g" "$APP_DIR/doggs.service" | sudo tee /etc/systemd/system/doggs.service >/dev/null; sudo systemctl daemon-reload; sudo systemctl enable --now doggs
   if sudo systemctl is-active --quiet doggs; then success "doggs.service is enabled for startup and running. Open $(open_address)"; else error "doggs.service was installed but did not start. Run: sudo systemctl status doggs --no-pager"; exit 1; fi
 else
   command -v python3 >/dev/null || { error "python3 is required."; exit 1; }; heading "Installing local application"; python3 -m venv "$APP_DIR/.venv"; "$APP_DIR/.venv/bin/pip" install -U pip; "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
+  fetch_tabler_css "$APP_DIR"
   load_env; ensure_ocr_language "$OCR_LANG"; mkdir -p "$(absolute_path "$INCOMING_DIR")" "$(absolute_path "$ARCHIVE_DIR")" "$(absolute_path "$DATA_DIR")" "$(absolute_path "$ERROR_DIR")" "$(absolute_path "$DUPLICATE_DIR")"; success "Installed. Start with ./run.sh, then open $(open_address)"
 fi
 if [[ "$INSTALL_OLLAMA" == true ]]; then

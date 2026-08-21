@@ -12,6 +12,7 @@ function applyTheme(name) {
 
 function applyLayout(name) {
   document.documentElement.dataset.layout = name;
+  $('tablerStylesheet').disabled = name !== 'tabler';
   try { localStorage.setItem(LAYOUT_KEY, name) } catch {}
   document.querySelectorAll('[data-layout-choice]').forEach(card => card.classList.toggle('selected', card.dataset.layoutChoice === name));
 }

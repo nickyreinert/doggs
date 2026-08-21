@@ -6,39 +6,41 @@
   <title>DOGGS</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ctext y='51' font-size='36'%3E🐶🐶%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/tabler/css/tabler.min.css') }}" id="tablerStylesheet" disabled>
   <script>
     try {
       var t = localStorage.getItem('doggs-theme');
       if (t && t !== 'classic') document.documentElement.dataset.theme = t;
       var l = localStorage.getItem('doggs-layout');
       if (l && l !== 'classic') document.documentElement.dataset.layout = l;
+      if (l === 'tabler') document.getElementById('tablerStylesheet').disabled = false;
     } catch (e) {}
   </script>
 </head>
 <body>
-<header id="appHeader">
-  <div class="brand">
+<header id="appHeader" class="navbar navbar-expand-md navbar-light d-print-none">
+  <div class="brand navbar-brand">
     <span class="brand-logo">🐶🐶</span>
     <span>DOGGS</span>
     <span class="brand-subtitle">local document archive</span>
   </div>
   <div class="header-grid">
-    <section class="year-panel">
+    <section class="year-panel card card-sm">
       <label for="years">Years</label>
-      <select id="years" multiple size="5"></select>
+      <select id="years" class="form-select" multiple size="5"></select>
     </section>
-    <section class="search-panel">
+    <section class="search-panel card card-sm">
       <label class="quick-label" for="query">Quick search</label>
-      <input id="query" type="search" placeholder="Filename, date, classification…">
+      <input id="query" class="form-control" type="search" placeholder="Filename, date, classification…">
       <label class="duplicates">
         <input id="duplicates" type="checkbox"> Duplicates only <span class="count" id="duplicateCount">0</span>
       </label>
-      <button type="button" class="action" id="resetFilters">Reset filters</button>
+      <button type="button" class="action btn btn-outline-primary btn-sm" id="resetFilters">Reset filters</button>
     </section>
-    <section class="tag-panel">
+    <section class="tag-panel card card-sm">
       <label for="tagSearch">Tags</label>
       <div class="tag-row">
-        <input id="tagSearch" class="tag-search" type="search" placeholder="Filter tags…">
+        <input id="tagSearch" class="tag-search form-control" type="search" placeholder="Filter tags…">
         <div class="chips" id="tags"></div>
       </div>
     </section>
@@ -46,8 +48,8 @@
   <div class="header-resizer" id="headerResizer" title="Drag to resize header"></div>
 </header>
 <main>
-  <aside id="files"></aside>
-  <section id="preview">
+  <aside id="files" class="card"></aside>
+  <section id="preview" class="card">
     <div class="preview-head">
       <div class="preview-head-top">
         <div class="preview-head-info">
@@ -115,10 +117,10 @@
     <span><span class="dot" id="ollamaDot"></span> <span id="ollamaStatus">Checking Ollama…</span></span>
     <span id="modelStatus"></span>
     <div class="footer-actions">
-      <button class="icon-button" id="settingsButton" title="Tag settings" aria-label="Tag settings">⚙</button>
-      <button class="scan-button" id="scanNow">Scan now</button>
-      <button class="scan-button" id="pausePipeline">Pause pipeline</button>
-      <button class="footer-toggle" id="pipelineToggle" title="Expand pipeline" aria-label="Expand pipeline">⌃</button>
+      <button class="icon-button btn btn-icon" id="settingsButton" title="Tag settings" aria-label="Tag settings">⚙</button>
+      <button class="scan-button btn btn-primary btn-sm" id="scanNow">Scan now</button>
+      <button class="scan-button btn btn-primary btn-sm" id="pausePipeline">Pause pipeline</button>
+      <button class="footer-toggle btn btn-icon" id="pipelineToggle" title="Expand pipeline" aria-label="Expand pipeline">⌃</button>
     </div>
   </div>
   <div class="pipeline" id="pipeline">
@@ -211,6 +213,11 @@
         <span class="layout-swatch layout-swatch-sidebar"><i class="lsw-r"></i><i class="lsw-l"></i><i class="lsw-m"></i></span>
         <span class="theme-name">Sidebar</span>
         <span class="theme-desc">Slim top bar, filters in a left-hand rail — classic admin-dashboard layout.</span>
+      </button>
+      <button type="button" class="theme-card" data-layout-choice="tabler">
+        <span class="layout-swatch layout-swatch-sidebar"><i class="lsw-r"></i><i class="lsw-l"></i><i class="lsw-m"></i></span>
+        <span class="theme-name">Tabler</span>
+        <span class="theme-desc">Real open-source Tabler dashboard styling (cards, navbar, form controls), downloaded at install/update time.</span>
       </button>
     </div>
     <h3 class="settings-subhead">Color theme</h3>
