@@ -46,25 +46,15 @@ TABLER_VERSION="1.4.0"
 echo "[UPDATE] Refreshing Tabler CSS (optional 'Tabler' layout) in $BASE_DIR…"
 BASE_TABLER_DIR="$BASE_DIR/static/vendor/tabler/css"; BASE_TABLER_FILE="$BASE_TABLER_DIR/tabler.min.css"
 TABLER_URL="https://cdn.jsdelivr.net/npm/@tabler/core@${TABLER_VERSION}/dist/css/tabler.min.css"
-mkdir -p "$BASE_TABLER_DIR" 2>/dev/null || sudo mkdir -p "$BASE_TABLER_DIR"
-TABLER_FETCHED=false
+mkdir -p "$BASE_TABLER_DIR"
 if command -v curl >/dev/null 2>&1; then
-  if curl -fsSL "$TABLER_URL" -o "$BASE_TABLER_FILE.tmp" 2>/dev/null || sudo curl -fsSL "$TABLER_URL" -o "$BASE_TABLER_FILE.tmp"; then
-    mv "$BASE_TABLER_FILE.tmp" "$BASE_TABLER_FILE" 2>/dev/null || sudo mv "$BASE_TABLER_FILE.tmp" "$BASE_TABLER_FILE"
-    TABLER_FETCHED=true
+  if curl -fsSL "$TABLER_URL" -o "$BASE_TABLER_FILE.tmp"; then
+    mv "$BASE_TABLER_FILE.tmp" "$BASE_TABLER_FILE"
     echo "[OK] Fetched Tabler CSS v$TABLER_VERSION into $BASE_DIR."
   else
-    rm -f "$BASE_TABLER_FILE.tmp" 2>/dev/null || sudo rm -f "$BASE_TABLER_FILE.tmp"
+    rm -f "$BASE_TABLER_FILE.tmp"
     echo "[NOTE] Could not download Tabler CSS (offline?). The 'Tabler' layout option will look unstyled until this succeeds." >&2
   fi
-fi
-# /opt/doggs is a separate deployment copy (not the checkout update.sh runs from) — carry the
-# fetched asset over there too, without touching anything else under /opt/doggs (data, .env, …).
-if [[ "$TARGET_DIR" == "/opt/doggs" && "$BASE_DIR" != "/opt/doggs" && "$TABLER_FETCHED" == true ]]; then
-  sudo mkdir -p "$TARGET_DIR/static/vendor/tabler/css"
-  sudo cp "$BASE_TABLER_FILE" "$TARGET_DIR/static/vendor/tabler/css/tabler.min.css"
-  sudo chown -R "${SERVICE_USER:-root}:${SERVICE_GROUP:-root}" "$TARGET_DIR/static/vendor"
-  echo "[OK] Copied Tabler CSS to $TARGET_DIR."
 fi
 
 if [[ "$SERVICE_ACTIVE" == true ]]; then
