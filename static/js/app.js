@@ -1,6 +1,13 @@
 const state = { q: '', years: new Set(), tags: new Set(), duplicates: false, selected: null, requestedDocument: '' };
 let files = [], timer, availableYears = [], visibleTags = [], tagAliases = {};
 const $ = id => document.getElementById(id);
+const THEME_KEY = 'doggs-theme';
+
+function applyTheme(name) {
+  document.documentElement.dataset.theme = name;
+  try { localStorage.setItem(THEME_KEY, name) } catch {}
+  document.querySelectorAll('.theme-card').forEach(card => card.classList.toggle('selected', card.dataset.themeChoice === name));
+}
 
 function syncUrl(push = false) {
   const p = new URLSearchParams();
@@ -393,6 +400,8 @@ function showSettingsTab(name) {
   document.querySelectorAll('.settings-pane').forEach(pane => pane.hidden = pane.dataset.pane !== name);
 }
 
+document.querySelectorAll('.theme-card').forEach(card => card.onclick = () => applyTheme(card.dataset.themeChoice));
+
 function updateScheduleFields() {
   const daily = $('scheduleMode').value === 'daily';
   $('intervalSchedule').hidden = daily;
@@ -425,6 +434,7 @@ async function openSettings(updateUrl = true) {
   $('intervalMinutes').value = s.schedule.interval_minutes;
   $('dailyTimes').value = s.schedule.daily_times.join(', ');
   updateScheduleFields();
+  applyTheme(document.documentElement.dataset.theme || 'classic');
   showSettingsTab('tags');
   if (!$('settingsDialog').open) $('settingsDialog').showModal();
   if (updateUrl) syncUrl(true);
