@@ -12,8 +12,7 @@
       var t = localStorage.getItem('doggs-theme');
       if (t && t !== 'classic') document.documentElement.dataset.theme = t;
       var l = localStorage.getItem('doggs-layout');
-      if (l && l !== 'classic') document.documentElement.dataset.layout = l;
-      if (l === 'tabler') document.getElementById('tablerStylesheet').disabled = false;
+      if (l === 'tabler') { document.documentElement.dataset.layout = l; document.getElementById('tablerStylesheet').disabled = false; }
     } catch (e) {}
   </script>
 </head>
@@ -208,11 +207,6 @@
         <span class="layout-swatch layout-swatch-classic"><i class="lsw-h"></i><i class="lsw-l"></i><i class="lsw-m"></i></span>
         <span class="theme-name">Classic</span>
         <span class="theme-desc">Filters across the top, file list on the left.</span>
-      </button>
-      <button type="button" class="theme-card" data-layout-choice="sidebar">
-        <span class="layout-swatch layout-swatch-sidebar"><i class="lsw-r"></i><i class="lsw-l"></i><i class="lsw-m"></i></span>
-        <span class="theme-name">Sidebar</span>
-        <span class="theme-desc">Slim top bar, filters in a left-hand rail — classic admin-dashboard layout.</span>
       </button>
       <button type="button" class="theme-card" data-layout-choice="tabler">
         <span class="layout-swatch layout-swatch-sidebar"><i class="lsw-r"></i><i class="lsw-l"></i><i class="lsw-m"></i></span>
