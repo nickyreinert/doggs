@@ -152,11 +152,46 @@ def read_settings():
         metadata_prompt = DEFAULT_METADATA_PROMPT
     times = [value for value in schedule.get("daily_times", []) if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(value))]
     aliases = {slugify(key): slugify(value) for key, value in (data.get("tag_aliases") or {}).items() if slugify(key) and slugify(value) and slugify(key) != slugify(value)}
-    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "tag_aliases": aliases, "prompts": {"metadata": metadata_prompt, "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
+    raw_general = data.get("general")
+    general = {**current_general_defaults(), **(raw_general or {})}
+    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "tag_aliases": aliases, "general": general, "general_configured": raw_general is not None, "general_locked": general_locked_fields(), "prompts": {"metadata": metadata_prompt, "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
 
 def write_settings(settings):
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_PATH.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+
+GENERAL_ENV_MAP = {"incoming_dir": "INCOMING_DIR", "archive_dir": "ARCHIVE_DIR", "error_dir": "ERROR_DIR", "duplicate_dir": "DUPLICATE_DIR", "trash_dir": "TRASH_DIR", "recursive_scan": "RECURSIVE_SCAN", "ocr_lang": "OCR_LANG", "ai_mode": "AI_MODE", "ollama_url": "OLLAMA_URL", "ai_model": "AI_MODEL"}
+
+def general_locked_fields():
+    """Fields whose environment variable is explicitly set can't be overridden from the UI."""
+    return {key: True for key, env_name in GENERAL_ENV_MAP.items() if env_name in os.environ}
+
+def current_general_defaults():
+    return {"incoming_dir": str(INCOMING_DIR), "archive_dir": str(ARCHIVE_DIR), "error_dir": str(ERROR_DIR), "duplicate_dir": str(DUPLICATE_DIR), "trash_dir": str(TRASH_DIR), "recursive_scan": RECURSIVE_SCAN, "ocr_lang": OCR_LANG, "ai_mode": AI_MODE, "ollama_url": OLLAMA_URL, "ai_model": AI_MODEL}
+
+def apply_general_settings(general):
+    """Reassign the live directory/AI globals so a settings change applies without a restart."""
+    global INCOMING_DIR, ARCHIVE_DIR, ERROR_DIR, DUPLICATE_DIR, TRASH_DIR, RECURSIVE_SCAN, OCR_LANG, OCR_LANGS, AI_MODE, OLLAMA_URL, AI_MODEL
+    locked = general_locked_fields()
+    def resolved(key, current_path):
+        if locked.get(key): return current_path
+        value = str(general.get(key) or "").strip()
+        if not value: return current_path
+        path = Path(value).expanduser()
+        return path if path.is_absolute() else BASE_DIR / path
+    INCOMING_DIR = resolved("incoming_dir", INCOMING_DIR)
+    ARCHIVE_DIR = resolved("archive_dir", ARCHIVE_DIR)
+    ERROR_DIR = resolved("error_dir", ERROR_DIR)
+    DUPLICATE_DIR = resolved("duplicate_dir", DUPLICATE_DIR)
+    TRASH_DIR = resolved("trash_dir", TRASH_DIR)
+    if not locked.get("recursive_scan"): RECURSIVE_SCAN = bool(general.get("recursive_scan"))
+    if not locked.get("ocr_lang") and str(general.get("ocr_lang") or "").strip():
+        OCR_LANG = re.sub(r"[,\s]+", "+", str(general["ocr_lang"]).strip()).strip("+") or "eng"
+        OCR_LANGS = tuple(language for language in OCR_LANG.split("+") if language)
+    if not locked.get("ai_mode") and general.get("ai_mode") in {"ollama", "heuristic"}: AI_MODE = general["ai_mode"]
+    if not locked.get("ollama_url") and str(general.get("ollama_url") or "").strip(): OLLAMA_URL = str(general["ollama_url"]).strip()
+    if not locked.get("ai_model") and str(general.get("ai_model") or "").strip(): AI_MODEL = str(general["ai_model"]).strip()
+    ensure_dirs()
 
 def ignored_tags(): return set(read_settings()["ignored_tags"])
 
@@ -712,6 +747,11 @@ def settings():
     if request.method == "POST":
         payload = request.get_json(silent=True) or {}
         current = read_settings(); current["ignored_tags"] = sorted(set(tag_values(payload.get("ignored_tags", current["ignored_tags"]))))
+        general_payload = payload.get("general")
+        if isinstance(general_payload, dict):
+            locked = general_locked_fields()
+            current["general"] = {**current["general"], **{key: value for key, value in general_payload.items() if key in GENERAL_ENV_MAP and key not in locked}}
+        apply_general_settings(current["general"])
         prompts = payload.get("prompts", {})
         if isinstance(prompts, dict):
             for key in ("metadata", "summary"):
@@ -764,4 +804,4 @@ def serve_file():
     return send_file(full_path, mimetype="application/pdf")
 
 if __name__ == "__main__":
-    ensure_dirs(); start_worker(); log.info("DOGGS running at http://%s:%s", HOST, PORT); app.run(host=HOST, port=PORT, threaded=True)
+    apply_general_settings(read_settings()["general"]); ensure_dirs(); start_worker(); log.info("DOGGS running at http://%s:%s", HOST, PORT); app.run(host=HOST, port=PORT, threaded=True)

@@ -1,5 +1,5 @@
 const state = { q: '', years: new Set(), tags: new Set(), duplicates: false, selected: null, requestedDocument: '' };
-let files = [], timer, availableYears = [], visibleTags = [];
+let files = [], timer, availableYears = [], visibleTags = [], tagAliases = {};
 const $ = id => document.getElementById(id);
 
 function syncUrl(push = false) {
@@ -399,9 +399,26 @@ function updateScheduleFields() {
   $('dailySchedule').hidden = !daily;
 }
 
+const GENERAL_FIELDS = { generalIncoming: 'incoming_dir', generalArchive: 'archive_dir', generalError: 'error_dir', generalDuplicate: 'duplicate_dir', generalTrash: 'trash_dir', generalOcrLang: 'ocr_lang', generalAiMode: 'ai_mode', generalOllamaUrl: 'ollama_url', generalAiModel: 'ai_model' };
+
+function populateGeneralSettings(general, locked) {
+  Object.entries(GENERAL_FIELDS).forEach(([id, key]) => {
+    const field = $(id);
+    field.value = general[key] ?? '';
+    field.disabled = !!locked[key];
+    field.title = locked[key] ? 'Set via the ' + key.toUpperCase() + ' environment variable' : '';
+  });
+  $('generalRecursive').checked = !!general.recursive_scan;
+  $('generalRecursive').disabled = !!locked.recursive_scan;
+}
+
 async function openSettings(updateUrl = true) {
   const s = await (await fetch('/api/settings')).json();
   $('ignoredTags').value = s.ignored_tags.join(', ');
+  tagAliases = s.tag_aliases || {};
+  $('tagAliasSearch').value = '';
+  renderTagAliases();
+  populateGeneralSettings(s.general || {}, s.general_locked || {});
   $('metadataPrompt').value = s.prompts.metadata;
   $('summaryPrompt').value = s.prompts.summary;
   $('scheduleMode').value = s.schedule.mode;
@@ -415,9 +432,60 @@ async function openSettings(updateUrl = true) {
 
 async function saveSettings(event) {
   event.preventDefault();
-  const payload = { ignored_tags: $('ignoredTags').value.split(/[\s,]+/).filter(Boolean), prompts: { metadata: $('metadataPrompt').value, summary: $('summaryPrompt').value }, schedule: { mode: $('scheduleMode').value, interval_minutes: $('intervalMinutes').value, daily_times: $('dailyTimes').value.split(/[\s,]+/).filter(Boolean) } };
+  const payload = {
+    ignored_tags: $('ignoredTags').value.split(/[\s,]+/).filter(Boolean),
+    prompts: { metadata: $('metadataPrompt').value, summary: $('summaryPrompt').value },
+    schedule: { mode: $('scheduleMode').value, interval_minutes: $('intervalMinutes').value, daily_times: $('dailyTimes').value.split(/[\s,]+/).filter(Boolean) },
+    general: { ...Object.fromEntries(Object.entries(GENERAL_FIELDS).map(([id, key]) => [key, $(id).value.trim()])), recursive_scan: $('generalRecursive').checked }
+  };
   const r = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
   if (r.ok) { $('settingsDialog').close(); refresh(); refreshStatus() }
+}
+
+// First run: nudge the user to set up storage folders before they start scanning documents.
+async function checkFirstRunSetup() {
+  if ($('settingsDialog').open) return;
+  const s = await (await fetch('/api/settings')).json();
+  if (!s.general_configured) { await openSettings(true); showSettingsTab('general') }
+}
+
+// Canonical tags: shows every rename/merge as "original -> target" so the user can undo one if needed.
+function renderTagAliases() {
+  const needle = $('tagAliasSearch').value.trim().toLowerCase();
+  const entries = Object.entries(tagAliases).filter(([from, to]) => !needle || from.includes(needle) || to.includes(needle)).sort(([a], [b]) => a.localeCompare(b));
+  const list = $('tagAliasList');
+  list.innerHTML = '';
+  if (!entries.length) { list.innerHTML = '<div class="empty">No renamed tags yet.</div>'; return }
+  entries.forEach(([from, to]) => {
+    const row = document.createElement('div');
+    row.className = 'tag-alias-row';
+    const fromEl = document.createElement('span');
+    fromEl.className = 'tag-alias-from';
+    fromEl.textContent = from;
+    const arrow = document.createElement('span');
+    arrow.className = 'tag-alias-arrow';
+    arrow.textContent = '→';
+    const toEl = document.createElement('span');
+    toEl.className = 'tag-alias-to';
+    toEl.textContent = to;
+    const remove = document.createElement('button');
+    remove.className = 'tag-alias-remove';
+    remove.textContent = '×';
+    remove.title = 'Undo this rename';
+    remove.setAttribute('aria-label', 'Undo renaming ' + from + ' to ' + to);
+    remove.onclick = () => removeTagAlias(from);
+    row.append(fromEl, arrow, toEl, remove);
+    list.append(row);
+  });
+}
+
+async function removeTagAlias(tag) {
+  const r = await fetch('/api/tags/' + encodeURIComponent(tag) + '/alias', { method: 'DELETE' });
+  if (!r.ok) return;
+  const d = await r.json();
+  tagAliases = d.tag_aliases || {};
+  renderTagAliases();
+  refresh();
 }
 
 function togglePipeline() {
@@ -436,8 +504,15 @@ $('years').onchange = e => {
 };
 $('query').oninput = e => { state.q = e.target.value.trim(); syncUrl(); clearTimeout(timer); timer = setTimeout(refresh, 250) };
 $('tagSearch').oninput = () => renderTags(visibleTags);
+$('tagAliasSearch').oninput = renderTagAliases;
 $('tagInput').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); addDocumentTag() } };
 $('duplicates').onchange = e => { state.duplicates = e.target.checked; syncUrl(true); refresh() };
+$('resetFilters').onclick = () => {
+  state.q = ''; state.years = new Set(); state.tags = new Set(); state.duplicates = false;
+  $('query').value = ''; $('duplicates').checked = false; $('tagSearch').value = '';
+  syncUrl(true);
+  refresh();
+};
 $('saveDetails').onclick = saveDetails;
 $('yearInput').onchange = moveDocumentYear;
 $('runOcr').onclick = runOcr;
@@ -465,5 +540,6 @@ document.querySelectorAll('.settings-tab').forEach(button => button.onclick = ()
 restoreUrlState();
 refresh();
 refreshStatus();
+checkFirstRunSetup();
 window.addEventListener('popstate', () => { restoreUrlState(); refresh() });
 setInterval(() => { refresh(); refreshStatus() }, 15000);
