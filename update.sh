@@ -46,13 +46,14 @@ TABLER_VERSION="1.4.0"
 echo "[UPDATE] Refreshing Tabler CSS (optional 'Tabler' layout)…"
 TABLER_DIR="$TARGET_DIR/static/vendor/tabler/css"; TABLER_FILE="$TABLER_DIR/tabler.min.css"
 TABLER_URL="https://cdn.jsdelivr.net/npm/@tabler/core@${TABLER_VERSION}/dist/css/tabler.min.css"
-if [[ "$TARGET_DIR" == "/opt/doggs" ]]; then MKDIR="sudo -u ${SERVICE_USER:-root} mkdir"; CURL_AS="sudo -u ${SERVICE_USER:-root}"; else MKDIR="mkdir"; CURL_AS=""; fi
-$MKDIR -p "$TABLER_DIR"
-if command -v curl >/dev/null 2>&1 && $CURL_AS curl -fsSL "$TABLER_URL" -o "$TABLER_FILE.tmp"; then
-  $CURL_AS mv "$TABLER_FILE.tmp" "$TABLER_FILE"
+if [[ "$TARGET_DIR" == "/opt/doggs" ]]; then SUDO_ROOT="sudo"; else SUDO_ROOT=""; fi
+$SUDO_ROOT mkdir -p "$TABLER_DIR"
+if command -v curl >/dev/null 2>&1 && $SUDO_ROOT curl -fsSL "$TABLER_URL" -o "$TABLER_FILE.tmp"; then
+  $SUDO_ROOT mv "$TABLER_FILE.tmp" "$TABLER_FILE"
+  if [[ "$TARGET_DIR" == "/opt/doggs" ]]; then sudo chown -R "${SERVICE_USER:-root}:${SERVICE_GROUP:-root}" "$TARGET_DIR/static/vendor"; fi
   echo "[OK] Fetched Tabler CSS v$TABLER_VERSION."
 else
-  $CURL_AS rm -f "$TABLER_FILE.tmp"
+  $SUDO_ROOT rm -f "$TABLER_FILE.tmp"
   echo "[NOTE] Could not download Tabler CSS (offline?). The 'Tabler' layout option will look unstyled until this succeeds." >&2
 fi
 
