@@ -740,6 +740,12 @@ def rename_tag(tag):
     save_tag_alias(tag, canonical)
     return jsonify({"tag_aliases": tag_aliases()})
 
+@app.delete("/api/tags/<tag>/alias")
+def delete_tag_alias(tag):
+    """Undo a rename/merge so the tag is shown under its original name again."""
+    settings = read_settings(); settings["tag_aliases"].pop(slugify(tag), None); write_settings(settings)
+    return jsonify({"tag_aliases": settings["tag_aliases"]})
+
 @app.post("/api/rerun-llm")
 def api_rerun_llm():
     row_ids = [str(value) for value in (request.get_json(silent=True) or {}).get("ids", []) if value]
