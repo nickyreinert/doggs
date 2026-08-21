@@ -492,8 +492,14 @@ def search_rows(rows, query):
     terms = query.lower().split()
     return [row for row in rows if all(term in " ".join(row.get(key, "") for key in FIELDNAMES).lower() for term in terms)]
 
-def serialize_row(row):
-    return {**row, "name": Path(row.get("stored_path", "")).name, "document_tags": document_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "ocr_scan": OCR_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})}
+def duplicate_counts_by_original(rows):
+    """Map each original document's id to how many duplicate copies point at it."""
+    return Counter(row.get("duplicate_of") for row in rows if row.get("is_duplicate") and row.get("duplicate_of"))
+
+def serialize_row(row, duplicate_counts=None):
+    original_id = row.get("duplicate_of") or row.get("id")
+    duplicate_count = (duplicate_counts or {}).get(original_id, 0)
+    return {**row, "name": Path(row.get("stored_path", "")).name, "document_tags": document_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "duplicate_count": duplicate_count, "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "ocr_scan": OCR_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})}
 
 @app.route("/")
 def index(): return render_template("index.html")
@@ -508,7 +514,8 @@ def api_index():
     counts = Counter(tag for row in tag_rows for tag in row_tags(row))
     files.sort(key=lambda row: (row.get("date", ""), row.get("stored_path", "")), reverse=True)
     selected_row = next((row for row in rows if row.get("id") == selected_id), None)
-    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [serialize_row(row) for row in files], "selected_file": serialize_row(selected_row) if selected_row else None})
+    duplicate_counts = duplicate_counts_by_original(rows)
+    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [serialize_row(row, duplicate_counts) for row in files], "selected_file": serialize_row(selected_row, duplicate_counts) if selected_row else None})
 
 @app.route("/api/file/<row_id>/duplicates")
 def file_duplicates(row_id):
@@ -518,7 +525,8 @@ def file_duplicates(row_id):
     original_id = row.get("duplicate_of") or row.get("id")
     group = [item for item in rows if item.get("id") == original_id or item.get("duplicate_of") == original_id]
     group.sort(key=lambda item: item.get("created_at", ""))
-    return jsonify({"documents": [serialize_row(item) for item in group]})
+    duplicate_counts = duplicate_counts_by_original(rows)
+    return jsonify({"documents": [serialize_row(item, duplicate_counts) for item in group]})
 
 @app.post("/api/file/<row_id>")
 def update_file(row_id):

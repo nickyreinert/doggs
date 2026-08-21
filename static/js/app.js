@@ -84,18 +84,14 @@ function renderTags(items) {
 }
 
 // Duplicate copies are grouped onto their original's list entry with a count badge instead of listed separately.
+// f.duplicate_count comes from the server and is filter-independent, so it stays correct even when the
+// original (or a sibling copy) is hidden by the current year/tag/search filters.
 function renderFiles(list) {
   files = list;
   const e = $('files');
   e.innerHTML = '';
   if (!list.length) { e.innerHTML = '<div class="empty">No documents found.</div>'; return }
   const byId = new Map(list.map(f => [f.id, f]));
-  const dupeCounts = new Map();
-  list.forEach(f => {
-    if (f.is_duplicate && f.duplicate_of && byId.has(f.duplicate_of)) {
-      dupeCounts.set(f.duplicate_of, (dupeCounts.get(f.duplicate_of) || 0) + 1);
-    }
-  });
   const visible = list.filter(f => !(f.is_duplicate && f.duplicate_of && byId.has(f.duplicate_of)));
   const groups = {};
   visible.forEach(f => (groups[f.year || 'unknown'] ??= []).push(f));
@@ -104,7 +100,7 @@ function renderFiles(list) {
     g.className = 'year-group';
     g.innerHTML = '<h3>' + y + '</h3>';
     groups[y].forEach(f => {
-      const dupeCount = dupeCounts.get(f.id) || 0;
+      const dupeCount = f.duplicate_count || 0;
       const b = document.createElement('button');
       b.className = 'file' + (state.selected?.id === f.id ? ' active' : '');
       b.innerHTML = '<div class="title"></div><div class="meta"></div><div class="summary"></div>';
@@ -114,8 +110,9 @@ function renderFiles(list) {
       if (dupeCount) {
         const badge = document.createElement('span');
         badge.className = 'dupe-badge';
-        badge.textContent = String(dupeCount);
-        badge.title = dupeCount + ' duplicate' + (dupeCount > 1 ? 's' : '') + ' of this document';
+        const total = dupeCount + 1;
+        badge.textContent = String(total);
+        badge.title = total + ' copies of this document (' + dupeCount + ' duplicate' + (dupeCount > 1 ? 's' : '') + ')';
         b.append(badge);
       }
       b.onclick = () => dupeCount ? openDuplicates(f) : selectFile(f);
