@@ -37,6 +37,7 @@ CSV_PATH = configured_path("CSV_PATH", DATA_DIR / "index.csv")
 SETTINGS_PATH = configured_path("SETTINGS_PATH", DATA_DIR / "settings.json")
 ERROR_DIR = configured_path("ERROR_DIR", BASE_DIR / "errors")
 DUPLICATE_DIR = configured_path("DUPLICATE_DIR", BASE_DIR / "duplicates")
+TRASH_DIR = configured_path("TRASH_DIR", BASE_DIR / "trash")
 HOST, PORT = os.getenv("HOST", "0.0.0.0"), int(os.getenv("PORT", "8383"))
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "300"))
 RECURSIVE_SCAN = os.getenv("RECURSIVE_SCAN", "0") == "1"
@@ -77,7 +78,7 @@ Tags must be specific facts visibly present in this document: its document type,
 DEFAULT_SUMMARY_PROMPT = "Summarize documents accurately in one concise paragraph. Return only the summary."
 
 def ensure_dirs():
-    for path in (INCOMING_DIR, ARCHIVE_DIR, DATA_DIR, ERROR_DIR, DUPLICATE_DIR, CSV_PATH.parent): path.mkdir(parents=True, exist_ok=True)
+    for path in (INCOMING_DIR, ARCHIVE_DIR, DATA_DIR, ERROR_DIR, DUPLICATE_DIR, TRASH_DIR, CSV_PATH.parent): path.mkdir(parents=True, exist_ok=True)
 
 def ensure_csv():
     global CSV_PATH
@@ -462,7 +463,7 @@ def scan_incoming():
     if not SCAN_LOCK.acquire(blocking=False):
         return
     try:
-        managed_dirs = (ARCHIVE_DIR, ERROR_DIR, DUPLICATE_DIR)
+        managed_dirs = (ARCHIVE_DIR, ERROR_DIR, DUPLICATE_DIR, TRASH_DIR)
         source_paths = INCOMING_DIR.rglob("*") if RECURSIVE_SCAN else INCOMING_DIR.iterdir()
         candidates = sorted((p for p in source_paths if p.is_file() and p.suffix.lower() == ".pdf" and not any(is_within(directory, p) for directory in managed_dirs)), key=lambda p: p.stat().st_mtime)
         for path in candidates:
@@ -588,8 +589,8 @@ def delete_file(row_id):
     if not row: abort(404)
     path = file_path_for_row(row)
     if path.is_file():
-        try: path.unlink()
-        except OSError: log.exception("Could not delete file %s", path)
+        try: move_to_side_dir(path, TRASH_DIR)
+        except OSError: log.exception("Could not move %s to trash", path)
     write_rows([item for item in rows if item.get("id") != row_id])
     STATUS_CACHE["payload"] = None
     return jsonify({"ok": True})
