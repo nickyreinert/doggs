@@ -54,20 +54,6 @@ ensure_ocr_language() {
   for language in "${missing[@]}"; do ocr_language_installed "$language" || { error "Tesseract language '$language' could not be verified after installation."; exit 1; }; done
   success "Tesseract language(s) '$requested' are available."
 }
-TABLER_VERSION="1.4.0"
-fetch_tabler_css() {
-  local app_dir="$1" target_dir target_file url
-  target_dir="$app_dir/static/vendor/tabler/css"; target_file="$target_dir/tabler.min.css"
-  url="https://cdn.jsdelivr.net/npm/@tabler/core@${TABLER_VERSION}/dist/css/tabler.min.css"
-  mkdir -p "$target_dir"
-  if command -v curl >/dev/null 2>&1 && curl -fsSL "$url" -o "$target_file.tmp"; then
-    mv "$target_file.tmp" "$target_file"
-    success "Fetched Tabler CSS v$TABLER_VERSION (optional 'Tabler' layout)."
-  else
-    rm -f "$target_file.tmp"
-    warning "Could not download Tabler CSS (offline?). The 'Tabler' layout option will look unstyled until static/vendor/tabler/css/tabler.min.css is fetched — rerun update.sh once online."
-  fi
-}
 if [[ ! -f "$BASE_DIR/app.py" ]]; then
   heading "DOGGS bootstrap"
   TARGET_DIR="${DOGGS_INSTALL_DIR:-$PWD/doggs}"
@@ -113,7 +99,6 @@ if [[ "$SYSTEM" == true ]]; then
   sudo apt-get update -qq; sudo apt-get install -qq -y curl git python3 python3-venv python3-pip >/dev/null
   ensure_ocr_language "$OCR_LANG"
   sudo mkdir -p "$APP_DIR"; sudo cp -a "$BASE_DIR/." "$APP_DIR/"; sudo chown -R "$SERVICE_USER:$SERVICE_GROUP" "$APP_DIR"
-  fetch_tabler_css "$APP_DIR"
   info "Setting up the Python environment…"
   [[ -d "$APP_DIR/.venv" ]] || sudo -u "$SERVICE_USER" python3 -m venv "$APP_DIR/.venv"
   sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/pip" install -q -U pip; sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/pip" install -q -U -r "$APP_DIR/requirements.txt"
@@ -126,7 +111,6 @@ else
   [[ -d "$APP_DIR/.venv" ]] || python3 -m venv "$APP_DIR/.venv"
   info "Setting up the Python environment…"
   "$APP_DIR/.venv/bin/pip" install -q -U pip; "$APP_DIR/.venv/bin/pip" install -q -U -r "$APP_DIR/requirements.txt"
-  fetch_tabler_css "$APP_DIR"
   mkdir -p "$(absolute_path "$INCOMING_DIR")" "$(absolute_path "$ARCHIVE_DIR")" "$(absolute_path "$DATA_DIR")" "$(absolute_path "$ERROR_DIR")" "$(absolute_path "$DUPLICATE_DIR")"
   success "Installed. Start with ./run.sh, then open $(open_address) — adjust folders, OCR language, and AI mode anytime in Settings."
 fi

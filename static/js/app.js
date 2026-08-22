@@ -2,27 +2,12 @@ const state = { q: '', years: new Set(), tags: new Set(), duplicates: false, sel
 let files = [], timer, availableYears = [], visibleTags = [], tagAliases = {};
 const $ = id => document.getElementById(id);
 const THEME_KEY = 'doggs-theme';
-const LAYOUT_KEY = 'doggs-layout';
 
 function applyTheme(name) {
   document.documentElement.dataset.theme = name;
   try { localStorage.setItem(THEME_KEY, name) } catch {}
   document.querySelectorAll('[data-theme-choice]').forEach(card => card.classList.toggle('selected', card.dataset.themeChoice === name));
 }
-
-let tablerCssFailed = false;
-function applyLayout(name) {
-  if (name === 'tabler' && tablerCssFailed) name = 'classic';
-  document.documentElement.dataset.layout = name;
-  $('tablerStylesheet').disabled = name !== 'tabler';
-  try { localStorage.setItem(LAYOUT_KEY, name) } catch {}
-  document.querySelectorAll('[data-layout-choice]').forEach(card => card.classList.toggle('selected', card.dataset.layoutChoice === name));
-}
-// The vendored CSS is fetched by install.sh/update.sh, not committed — fall back if it's missing.
-$('tablerStylesheet').addEventListener('error', () => {
-  tablerCssFailed = true;
-  if (document.documentElement.dataset.layout === 'tabler') applyLayout('classic');
-});
 
 function syncUrl(push = false) {
   const p = new URLSearchParams();
@@ -416,7 +401,6 @@ function showSettingsTab(name) {
 }
 
 document.querySelectorAll('[data-theme-choice]').forEach(card => card.onclick = () => applyTheme(card.dataset.themeChoice));
-document.querySelectorAll('[data-layout-choice]').forEach(card => card.onclick = () => applyLayout(card.dataset.layoutChoice));
 
 function updateScheduleFields() {
   const daily = $('scheduleMode').value === 'daily';
@@ -451,7 +435,6 @@ async function openSettings(updateUrl = true) {
   $('dailyTimes').value = s.schedule.daily_times.join(', ');
   updateScheduleFields();
   applyTheme(document.documentElement.dataset.theme || 'classic');
-  applyLayout(document.documentElement.dataset.layout || 'classic');
   showSettingsTab('tags');
   if (!$('settingsDialog').open) $('settingsDialog').showModal();
   if (updateUrl) syncUrl(true);
