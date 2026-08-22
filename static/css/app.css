@@ -120,19 +120,24 @@ html[data-theme="aurora"] .theme-card{background:#f3f4fd;border-color:#dfe1f6;co
 html[data-theme="aurora"] .theme-card.selected{border-color:#5b5bd6;background:#eceafd;box-shadow:0 0 0 1px #5b5bd6 inset}
 html[data-theme="aurora"] .theme-desc{color:#6c70a0}
 
-/* Layout: Tabler - structural grid placement only; visuals come from the real @tabler/core CSS (enabled via #tablerStylesheet, fetched by install.sh/update.sh) plus the navbar/card/btn/form-control classes added in the markup */
-html[data-layout="tabler"] body{display:grid;grid-template-columns:220px 330px minmax(0,1fr);grid-template-rows:auto auto auto 1fr auto;grid-template-areas:"brand brand brand" "years list preview" "search list preview" "tags list preview" "footer footer footer";height:100vh;overflow:hidden}
+/* Layout: Tabler - a genuinely different dashboard arrangement (top navbar, filters row, content row below) using real @tabler/core visuals (card/btn/form-control CSS from tabler.min.css) with Tabler-scale spacing instead of Classic's cramped, compact sizing */
+html[data-layout="tabler"] body{display:grid;grid-template-columns:300px minmax(0,1fr) minmax(0,1fr);grid-template-rows:auto auto 1fr auto;grid-template-areas:"brand brand brand" "years search tags" "list preview preview" "footer footer footer";gap:1rem;height:100vh;overflow:hidden;background:#f4f6fa;font-size:14px;padding:0 1rem 1rem}
 html[data-layout="tabler"] header{display:contents}
 html[data-layout="tabler"] .header-grid{display:contents}
 html[data-layout="tabler"] main{display:contents}
 html[data-layout="tabler"] .header-resizer{display:none}
-html[data-layout="tabler"] .brand{grid-area:brand;margin:0;padding:.5rem 1rem}
-html[data-layout="tabler"] .year-panel{grid-area:years;margin:12px 12px 6px}
-html[data-layout="tabler"] .search-panel{grid-area:search;margin:6px 12px}
-html[data-layout="tabler"] .tag-panel{grid-area:tags;display:flex;flex-direction:column;min-height:0;margin:6px 12px 12px}
-html[data-layout="tabler"] .tag-row{flex:1;min-height:0}
-html[data-layout="tabler"] #tags{max-height:none}
-html[data-layout="tabler"] aside{grid-area:list;min-height:0;margin:12px 12px 12px 0;overflow:auto}
-html[data-layout="tabler"] #preview{grid-area:preview;min-height:0;margin:12px 12px 12px 0;overflow:auto}
+html[data-layout="tabler"] .brand{grid-area:brand;margin:0 -1rem;padding:1rem 1.5rem;background:#fff;border-bottom:1px solid #e6e7e9;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+html[data-layout="tabler"] .year-panel{grid-area:years;margin:0;padding:1.25rem}
+html[data-layout="tabler"] .search-panel{grid-area:search;margin:0;padding:1.25rem}
+html[data-layout="tabler"] .tag-panel{grid-area:tags;display:flex;flex-direction:column;min-width:0;min-height:0;margin:0;padding:1.25rem}
+html[data-layout="tabler"] .year-panel>label,html[data-layout="tabler"] .tag-panel>label,html[data-layout="tabler"] .quick-label{font-size:.8125rem;font-weight:600;letter-spacing:normal;text-transform:none;color:#1d273b;margin-bottom:.5rem}
+html[data-layout="tabler"] .year-panel select{height:auto;min-height:130px;margin-bottom:0}
+html[data-layout="tabler"] .search-panel input[type=search]{height:auto;min-height:2.3rem}
+html[data-layout="tabler"] .tag-row{display:flex;flex:1 1 auto;min-height:0;flex-direction:column;align-items:stretch;gap:.75rem;overflow:hidden}
+html[data-layout="tabler"] .tag-row .tag-search{width:100%;min-width:0;align-self:stretch;margin:0}
+html[data-layout="tabler"] .tag-row #tags{width:100%;min-width:0;max-height:none;flex:1 1 auto;align-content:flex-start;overflow-x:hidden;overflow-y:auto;padding-right:.25rem}
+html[data-layout="tabler"] aside{grid-area:list;min-height:0;margin:0;padding:1.25rem;overflow:auto}
+html[data-layout="tabler"] #preview{grid-area:preview;min-height:0;margin:0;overflow:auto}
+html[data-layout="tabler"] .preview-head{padding:1.25rem 1.5rem}
 html[data-layout="tabler"] footer{grid-area:footer}
-@media(max-width:960px){html[data-layout="tabler"] body{grid-template-columns:1fr;grid-template-rows:auto auto auto auto auto auto auto;grid-template-areas:"brand" "years" "search" "tags" "list" "preview" "footer";height:auto;overflow:visible}}
+@media(max-width:960px){html[data-layout="tabler"] body{grid-template-columns:1fr;grid-template-rows:auto auto auto auto auto auto auto;grid-template-areas:"brand" "years" "search" "tags" "list" "preview" "footer";height:auto;overflow:visible;padding:0 .75rem .75rem}}
