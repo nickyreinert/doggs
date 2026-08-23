@@ -334,12 +334,13 @@ async function openDuplicates(f) {
   const r = await fetch('/api/file/' + encodeURIComponent(f.id) + '/duplicates');
   if (!r.ok) return;
   const d = await r.json();
+  state.selected = f;
+  state.requestedDocument = '';
+  syncUrl(true);
   renderDuplicatesGrid(d.documents || []);
 }
 
 function renderDuplicatesGrid(list) {
-  state.selected = null;
-  state.requestedDocument = '';
   $('detailsEditor').hidden = true;
   $('editorActions').hidden = true;
   $('frame').removeAttribute('src');
