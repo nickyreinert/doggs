@@ -57,6 +57,7 @@ async function refresh() {
   renderTags(d.tags || []);
   $('duplicateCount').textContent = d.duplicates_count || 0;
   renderFiles(d.files || []);
+  if (!selectedId && !state.selected && files.length) selectFile(files[0]);
   if (selectedId) {
     const f = files.find(x => x.id === selectedId) || d.selected_file;
     if (f) {
