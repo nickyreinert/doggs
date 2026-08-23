@@ -70,7 +70,7 @@ FULL_SCAN_STATE = {}
 OCR_SCAN_STATE = {}
 NORMAL_SCAN_STATE = {}
 LLM_RERUN_STATE = {"state": "idle", "current": 0, "total": 0, "error": ""}
-RESCAN_STATE = {"state": "idle", "current": 0, "total": 0, "processing": "", "error": ""}
+RESCAN_STATE = {"state": "idle", "current": 0, "total": 0, "processing": "", "queue": [], "stop_requested": False, "error": ""}
 SCHEDULE_STATE = {"last_interval": 0.0, "daily_runs": set()}
 LEGACY_METADATA_PROMPT = "Return JSON: date (YYYY-MM-DD|null), classification (one lowercase word such as invoice), tags (array of 2-5 short lowercase hyphenated tags), slug (2-5 lowercase hyphenated words based on the useful tags), summary (one accurate <=160-character sentence). For a German invoice, tags should resemble rechnung, firma-sattig, darmstadt, rechnungsdatum — never fpdf, pdflib, printer, php, or linux."
 DEFAULT_METADATA_PROMPT = """Extract metadata only from the supplied document text. Return one JSON object and nothing else:
@@ -483,9 +483,15 @@ def run_bulk_rescan(row_ids):
     RESCAN_STATE.update(state="running", current=0, total=len(row_ids), processing="", error="")
     try:
         for row_id in row_ids:
-            while PIPELINE_STATE["paused"]:
+            if RESCAN_STATE["stop_requested"]:
+                RESCAN_STATE.update(state="cancelled", processing="")
+                return
+            while PIPELINE_STATE["paused"] and not RESCAN_STATE["stop_requested"]:
                 RESCAN_STATE["processing"] = ""
                 time.sleep(.2)
+            if RESCAN_STATE["stop_requested"]:
+                RESCAN_STATE.update(state="cancelled", processing="")
+                return
             rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
             if not row:
                 RESCAN_STATE["current"] += 1; continue
@@ -841,11 +847,19 @@ def api_scan():
 @app.post("/api/rescan")
 def api_rescan():
     if RESCAN_STATE["state"] in {"queued", "running"}: return jsonify({"started": False, "message": "A re-scan is already in progress."}), 409
-    row_ids = [row["id"] for row in read_rows()]
-    RESCAN_STATE.update(state="queued", current=0, total=len(row_ids), processing="", error="")
+    rows = read_rows()
+    row_ids = [row["id"] for row in rows]
+    RESCAN_STATE.update(state="queued", current=0, total=len(row_ids), processing="", queue=[Path(row["stored_path"]).name for row in rows], stop_requested=False, error="")
     STATUS_CACHE["payload"] = None
     threading.Thread(target=run_bulk_rescan, args=(row_ids,), daemon=True).start()
     return jsonify({"started": True})
+
+@app.post("/api/rescan/stop")
+def stop_rescan():
+    if RESCAN_STATE["state"] not in {"queued", "running"}: return jsonify({"stopped": False, "message": "No re-scan is in progress."}), 409
+    RESCAN_STATE["stop_requested"] = True
+    STATUS_CACHE["payload"] = None
+    return jsonify({"stopped": True})
 
 @app.post("/api/pipeline/pause")
 def toggle_pipeline_pause():

@@ -406,9 +406,14 @@ async function refreshStatus() {
     const pauseState = p.paused ? (p.processing || rescan.processing ? ' · finishing current file' : ' · paused') : '';
     $('pipelineCount').textContent = 'Pipeline · ' + p.waiting_count + ' waiting' + pauseState + (!p.paused && p.processing ? ' · processing ' + p.processing : '') + rescanProgress;
     $('pausePipeline').textContent = p.paused ? 'Resume pipeline' : 'Pause pipeline';
+    $('stopScan').hidden = !rescanActive;
     $('ocrStatus').textContent = 'OCR ' + s.ocr_language + ': ' + (s.ocr_available ? 'available' : 'missing');
     const entries = p.waiting.map(x => '<li>' + x.name + ' · ' + Math.ceil(x.size / 1024) + ' KB · ' + x.state + '</li>');
-    if (rescanActive) entries.unshift('<li>' + (p.paused && !rescan.processing ? 'Re-scan paused' : 'Re-scanning ' + (rescan.processing || 'documents')) + ' · ' + rescan.current + '/' + rescan.total + ' · quick OCR and classification</li>');
+    if (rescanActive) {
+      const rescanEntries = (rescan.queue || []).slice(rescan.current + (rescan.processing ? 1 : 0), rescan.current + 31).map(name => '<li>' + name + ' · queued for quick OCR and classification</li>');
+      rescanEntries.unshift('<li>' + (p.paused && !rescan.processing ? 'Re-scan paused' : 'Re-scanning ' + (rescan.processing || 'documents')) + ' · ' + rescan.current + '/' + rescan.total + ' · quick OCR and classification</li>');
+      entries.unshift(...rescanEntries);
+    }
     $('pipelineList').innerHTML = entries.length ? entries.join('') : '<li>No PDFs waiting in the inbox.</li>';
     $('pipelineError').textContent = rescan.error || p.last_error || '';
   } catch {
@@ -566,6 +571,13 @@ $('scanNow').onclick = async () => {
   button.disabled = false;
   if (!r.ok) { alert('Could not start the re-scan.'); return }
   if (!$('pipeline').classList.contains('open')) togglePipeline();
+  refreshStatus();
+};
+$('stopScan').onclick = async () => {
+  const button = $('stopScan');
+  button.disabled = true;
+  const r = await fetch('/api/rescan/stop', { method: 'POST' });
+  if (!r.ok) { button.disabled = false; alert('Could not stop the re-scan.'); }
   refreshStatus();
 };
 $('pausePipeline').onclick = async () => { await fetch('/api/pipeline/pause', { method: 'POST' }); refreshStatus() };
