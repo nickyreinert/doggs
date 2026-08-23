@@ -15,7 +15,7 @@ from datetime import UTC, date, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urljoin
 
 import pymupdf as fitz
 import pytesseract
@@ -44,6 +44,7 @@ ERROR_DIR = configured_path("ERROR_DIR", BASE_DIR / "errors")
 DUPLICATE_DIR = configured_path("DUPLICATE_DIR", BASE_DIR / "duplicates")
 TRASH_DIR = configured_path("TRASH_DIR", BASE_DIR / "trash")
 HOST, PORT = os.getenv("HOST", "0.0.0.0"), int(os.getenv("PORT", "8383"))
+EXTERNAL_API_TOKEN = os.getenv("EXTERNAL_API_TOKEN", "").strip()
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "300"))
 RECURSIVE_SCAN = os.getenv("RECURSIVE_SCAN", "0") == "1"
 OCR_LANG = re.sub(r"[,\s]+", "+", os.getenv("OCR_LANG", "eng").strip()).strip("+") or "eng"
@@ -196,7 +197,9 @@ def read_settings():
     raw_general = data.get("general")
     general = {**current_general_defaults(), **(raw_general or {})}
     categories = list(dict.fromkeys(tag_values(data.get("categories", DEFAULT_CATEGORIES)))) or list(DEFAULT_CATEGORIES)
-    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "tag_aliases": aliases, "categories": categories, "general": general, "general_configured": general_is_configured(raw_general), "general_locked": general_locked_fields(), "prompts": {"metadata": metadata_prompt, "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
+    external_api = data.get("external_api") if isinstance(data.get("external_api"), dict) else {}
+    share_url = str(external_api.get("smb_share_url") or "").strip().rstrip("/")
+    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "tag_aliases": aliases, "categories": categories, "external_api": {"port": PORT, "token_configured": bool(EXTERNAL_API_TOKEN), "smb_share_url": share_url}, "general": general, "general_configured": general_is_configured(raw_general), "general_locked": general_locked_fields(), "prompts": {"metadata": metadata_prompt, "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
 
 def write_settings(settings):
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -700,6 +703,20 @@ def search_rows(rows, query):
     terms = query.lower().split()
     return [row for row in rows if all(term in " ".join(row.get(key, "") for key in FIELDNAMES).lower() for term in terms)]
 
+def external_api_authorized():
+    """Require a configured bearer token for integrations outside the DOGGS UI."""
+    authorization = request.headers.get("Authorization", "")
+    return bool(EXTERNAL_API_TOKEN) and authorization == f"Bearer {EXTERNAL_API_TOKEN}"
+
+def smb_url_for_row(row):
+    share_url = read_settings()["external_api"]["smb_share_url"]
+    if not share_url or row.get("location") != "archive": return ""
+    return urljoin(share_url + "/", quote(row.get("stored_path", ""), safe="/"))
+
+def external_document(row):
+    """Return the intentionally limited document representation for external LLMs."""
+    return {"id": row.get("id", ""), "name": Path(row.get("stored_path", "")).name, "date": row.get("date", ""), "year": row.get("year", ""), "category": row.get("category", ""), "classification": row.get("classification", ""), "tags": document_tags(row), "summary": row.get("summary", ""), "smb_url": smb_url_for_row(row)}
+
 def duplicate_counts_by_original(rows):
     """Map each original document's id to how many duplicate copies point at it."""
     return Counter(row.get("duplicate_of") for row in rows if row.get("is_duplicate") and row.get("duplicate_of"))
@@ -773,6 +790,38 @@ def api_index():
     category_counts = Counter(row.get("category") for row in category_rows if row.get("category"))
     category_values = list(dict.fromkeys(read_settings()["categories"] + sorted(category_counts)))
     return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "categories": [{"value": value, "count": category_counts[value], "selected": value in categories} for value in category_values], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [serializer(row, duplicate_counts) for row in files], "selected_file": serializer(selected_row, duplicate_counts) if selected_row else None})
+
+@app.get("/api/external/v1/catalog")
+def external_catalog():
+    """List filter vocabularies for an authorized external document-search client."""
+    if not external_api_authorized(): abort(401)
+    rows = [row for row in read_rows() if row.get("location") == "archive"]
+    tag_counts = Counter(tag for row in rows for tag in row_tags(row))
+    category_counts = Counter(row.get("category") for row in rows if row.get("category"))
+    categories = list(dict.fromkeys(read_settings()["categories"] + sorted(category_counts)))
+    return jsonify({"years": sorted({row.get("year") for row in rows if row.get("year")}, reverse=True), "categories": [{"value": value, "count": category_counts[value]} for value in categories], "tags": [{"value": value, "count": count} for value, count in tag_counts.most_common(MAX_TOKEN_FACETS)], "smb_share_configured": bool(read_settings()["external_api"]["smb_share_url"])})
+
+@app.get("/api/external/v1/documents")
+def external_documents():
+    """Search indexed archive documents for an authorized external LLM integration."""
+    if not external_api_authorized(): abort(401)
+    query = request.args.get("q", "").strip()
+    years = set(filter(None, request.args.get("years", "").split(",")))
+    categories = set(filter(None, request.args.get("categories", "").split(",")))
+    aliases = tag_aliases()
+    tags = {canonical_tag(tag, aliases) for tag in filter(None, request.args.get("tags", "").split(","))}
+    try: limit = max(1, min(100, int(request.args.get("limit", "25"))))
+    except ValueError: abort(400, "limit must be a number between 1 and 100.")
+    rows = [row for row in search_rows(read_rows(), query) if row.get("location") == "archive" and (not years or row.get("year") in years) and (not categories or row.get("category") in categories) and (not tags or tags.issubset(row_tags(row)))]
+    rows.sort(key=lambda row: (row.get("date", ""), row.get("stored_path", "")), reverse=True)
+    return jsonify({"count": len(rows), "documents": [external_document(row) for row in rows[:limit]]})
+
+@app.get("/api/external/v1/documents/<row_id>")
+def external_document_by_id(row_id):
+    if not external_api_authorized(): abort(401)
+    row = next((item for item in read_rows() if item.get("id") == row_id and item.get("location") == "archive"), None)
+    if not row: abort(404)
+    return jsonify(external_document(row))
 
 @app.route("/api/file/<row_id>/duplicates")
 def file_duplicates(row_id):
@@ -980,6 +1029,11 @@ def settings():
         current = read_settings(); current["ignored_tags"] = sorted(set(tag_values(payload.get("ignored_tags", current["ignored_tags"]))))
         if "categories" in payload:
             current["categories"] = list(dict.fromkeys(tag_values(payload["categories"]))) or list(DEFAULT_CATEGORIES)
+        external_api_payload = payload.get("external_api")
+        if isinstance(external_api_payload, dict):
+            share_url = str(external_api_payload.get("smb_share_url", "")).strip().rstrip("/")
+            if share_url and not re.fullmatch(r"smb://[^/\s]+/.+", share_url): abort(400, "SMB share URL must use smb://host/share.")
+            current["external_api"] = {"smb_share_url": share_url}
         general_payload = payload.get("general")
         if isinstance(general_payload, dict):
             locked = general_locked_fields()

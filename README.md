@@ -139,6 +139,7 @@ Restart DOGGS after changing `.env`. Relative local paths are resolved from the 
 | `OCR_LANG` | Tesseract language code | `eng` |
 | `AI_MODE` | `ollama` or `heuristic` | `ollama` |
 | `AI_MODEL` | Local metadata model | `qwen2.5:3b` |
+| `EXTERNAL_API_TOKEN` | Bearer token required by the external archive API | unset (API disabled) |
 
 The footer reports Ollama connectivity, selected-model availability, and OCR-language readiness.
 
@@ -149,6 +150,33 @@ By default, DOGGS scans only PDFs placed directly in `INCOMING_DIR`; subfolders 
 ## Opening DOGGS from another device
 
 `HOST=0.0.0.0` means “listen on every network interface”; it is not an address to type into a browser. Open the LAN address shown by `run.sh`, for example `http://192.168.178.150:8383`. If that address still cannot be reached while DOGGS is running, allow incoming TCP port `8383` in the host or NAS firewall. For Docker, publish the port as well (for example, `-p 8383:8383`).
+
+## External LLM API
+
+DOGGS offers a read-only API for external LLM tools. It runs on the same port as the web app, configured through `PORT`. Enable it by setting a strong bearer token in `.env` and restarting DOGGS:
+
+```dotenv
+EXTERNAL_API_TOKEN=replace-with-a-long-random-secret
+```
+
+In **Settings -> External API**, enter the SMB share URL that exposes the archive to the external client, for example `smb://nas.local/documents`. SMB sharing must be enabled and the archive must be reachable through that share. DOGGS returns archive-relative document pointers as `smb_url`; it does not transfer document bytes through the external API.
+
+Every request requires the header `Authorization: Bearer <EXTERNAL_API_TOKEN>`.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/external/v1/catalog` | Lists available years, categories, tags, and SMB configuration status. |
+| `GET /api/external/v1/documents` | Searches documents. Supports `q`, `years`, `categories`, `tags`, and `limit` (1-100). Multiple values are comma-separated. |
+| `GET /api/external/v1/documents/<id>` | Returns one indexed archive document. |
+
+Example search:
+
+```bash
+curl -H "Authorization: Bearer $EXTERNAL_API_TOKEN" \
+    "http://nas.local:8383/api/external/v1/documents?q=insurance&categories=insurance&limit=10"
+```
+
+The response includes document metadata, summary, tags, category, and an `smb_url` such as `smb://nas.local/documents/2026/2026-08-23_policy.pdf`.
 
 ## Local AI with Ollama
 

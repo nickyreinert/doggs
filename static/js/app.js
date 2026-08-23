@@ -460,6 +460,9 @@ async function openSettings(updateUrl = true) {
   const s = await (await fetch('/api/settings')).json();
   $('ignoredTags').value = s.ignored_tags.join(', ');
   $('categoriesInput').value = (s.categories || []).join('\n');
+  $('externalApiPort').value = s.external_api?.port ?? '';
+  $('externalApiTokenStatus').value = s.external_api?.token_configured ? 'Configured via EXTERNAL_API_TOKEN' : 'Not configured; external API is disabled';
+  $('smbShareUrl').value = s.external_api?.smb_share_url || '';
   tagAliases = s.tag_aliases || {};
   $('tagAliasSearch').value = '';
   renderTagAliases();
@@ -481,6 +484,7 @@ async function saveSettings(event) {
   const payload = {
     ignored_tags: $('ignoredTags').value.split(/[\s,]+/).filter(Boolean),
     categories: $('categoriesInput').value.split(/[\n,]+/).map(value => value.trim()).filter(Boolean),
+    external_api: { smb_share_url: $('smbShareUrl').value.trim() },
     prompts: { metadata: $('metadataPrompt').value, summary: $('summaryPrompt').value },
     schedule: { mode: $('scheduleMode').value, interval_minutes: $('intervalMinutes').value, daily_times: $('dailyTimes').value.split(/[\s,]+/).filter(Boolean) },
     general: { ...Object.fromEntries(Object.entries(GENERAL_FIELDS).map(([id, key]) => [key, $(id).value.trim()])), recursive_scan: $('generalRecursive').checked }
