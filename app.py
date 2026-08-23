@@ -73,11 +73,40 @@ LLM_RERUN_STATE = {"state": "idle", "current": 0, "total": 0, "error": ""}
 RESCAN_STATE = {"state": "idle", "current": 0, "total": 0, "processing": "", "queue": [], "stop_requested": False, "error": ""}
 SCHEDULE_STATE = {"last_interval": 0.0, "daily_runs": set()}
 LEGACY_METADATA_PROMPT = "Return JSON: date (YYYY-MM-DD|null), classification (one lowercase word such as invoice), tags (array of 2-5 short lowercase hyphenated tags), slug (2-5 lowercase hyphenated words based on the useful tags), summary (one accurate <=160-character sentence). For a German invoice, tags should resemble rechnung, firma-sattig, darmstadt, rechnungsdatum — never fpdf, pdflib, printer, php, or linux."
-DEFAULT_METADATA_PROMPT = """Extract metadata only from the supplied document text. Return one JSON object and nothing else:
-{"date":"YYYY-MM-DD or null","classification":"one lowercase category","tags":["2 to 5 lowercase-hyphenated tags"],"slug":"2 to 5 lowercase-hyphenated words","summary":"one accurate sentence, at most 160 characters"}.
+DEFAULT_METADATA_PROMPT = """
 
-Tags must be specific facts visibly present in this document: its document type, the actual sender/company/person, actual city, or a meaningful labelled date. Do not use examples, defaults, guesses, or facts from another document. If a fact is not present, omit it; fewer tags are better than invented tags. Never use PDF generator, software, printer, operating-system, web-browser, or OCR artefact names. For an invoice, include the document-type tag only when the text says it is an invoice; use the real company and real place only when they occur in the text."""
-DEFAULT_SUMMARY_PROMPT = "Summarize documents accurately in one concise paragraph. Return only the summary."
+You are an expert data extractor. Your ONLY output must be a valid, raw JSON object. Do not include markdown code blocks, conversational text, or explanations.
+
+Analyze the provided OCR document text and extract data strictly following these rules:
+- date: The primary document date in YYYY-MM-DD format (use null if not found).
+- classification: One lowercase category word (e.g., invoice, letter, receipt).
+- tags: Array of 2 to 5 lowercase-hyphenated specific facts found in the text (e.g., actual sender, city). Do not guess, make up tags, or use OCR/software artifact names.
+- slug: 2 to 5 lowercase-hyphenated words identifying the document.
+- summary: A single, accurate summary paragraph (maximum 160 characters).
+
+JSON Template:
+{
+  "date": null,
+  "classification": "",
+  "tags": [],
+  "slug": "",
+  "summary": ""
+}
+
+Document Text:
+
+"""
+DEFAULT_SUMMARY_PROMPT = """
+Summarize the core intent of this OCR document text in exactly one concise paragraph.
+
+Rules:
+- Include the most important facts: sender, recipient, main topic, and key figures (like amounts or deadlines).
+- Ignore OCR errors, random symbols, and boilerplate text.
+- Do not add information that is not in the text.
+- Output ONLY the summary paragraph. Do not include introductory phrases.
+
+Document text:
+"""
 
 def ensure_dirs():
     for path in (INCOMING_DIR, ARCHIVE_DIR, DATA_DIR, ERROR_DIR, DUPLICATE_DIR, TRASH_DIR, CSV_PATH.parent): path.mkdir(parents=True, exist_ok=True)
