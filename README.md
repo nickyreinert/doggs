@@ -14,6 +14,13 @@ It has no cloud account, no database server, and no mandatory AI dependency.
 - Stores PDFs under `archive/YYYY/YYYY-MM-DD_slug.pdf` and detects duplicates by SHA-256.
 - Keeps searchable metadata in `data/index.csv`.
 - Provides search, PDF preview, live Ollama/OCR status, and an expandable processing pipeline.
+- Filters documents by year, tags, duplicate state, and free-text search.
+- Shows inferred and custom document tags; tags can be added, removed, renamed, ignored, and used as filters.
+- Lets you edit document title, filename, archive year, summary, OCR text, and custom tags.
+- Navigates the document list with the up and down arrow keys outside form fields.
+- Groups duplicate copies under one list item and provides a preview grid for reviewing or removing copies.
+- Reprocesses all indexed documents with first-page OCR and local LLM classification through **Re-Scan all**.
+- Provides screenshot data at `/?demo=true` without writing to the archive or CSV index.
 
 ## Quick start
 
@@ -163,15 +170,19 @@ AI_MODE=heuristic
 
 ## Web UI and pipeline
 
-The top bar offers a year filter, multi-select slug-token filters (AND logic), and quick search across filename, date, classification, summary, and tokens. The sidebar groups documents by year; selecting a document opens its PDF preview.
-
-The footer shows live Ollama/model state. Open **Pipeline** to see waiting/processing PDFs, OCR readiness, the most recent processing error, and **Scan now** for an immediate scan.
+- The top bar filters by year, tags, duplicate state, and free-text search.
+- The sidebar groups documents by year; select a document or use the up and down arrow keys to open it.
+- The detail view edits title, filename, year, summary, OCR text, and custom tags.
+- Duplicate cards open a grid of all copies with per-copy removal.
+- The footer reports Ollama/model state, OCR readiness, queued inbox files, and processing errors.
+- **Re-Scan all** runs first-page OCR and metadata classification for every indexed document.
+- `/?demo=true` shows fake documents and a shared fake PDF for screenshots.
 
 ## Troubleshooting
 
 ### PDFs remain in the inbox
 
-Open **Pipeline** and choose **Scan now**. Failed PDFs move to `errors/`; duplicate hashes move to `duplicates/`.
+Open **Pipeline** and choose **Re-Scan all** only to refresh existing archive metadata. Incoming PDFs are scanned automatically; failed files move to `errors/` and duplicate hashes move to `duplicates/`.
 
 ### `OCR deu: missing`
 
