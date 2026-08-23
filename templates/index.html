@@ -22,20 +22,20 @@
   </div>
   <div class="header-grid">
     <section class="year-panel">
-      <label for="years">Years</label>
+      <label for="years"><u>Y</u>ears <span class="shortcut-hint">Ctrl+Y</span></label>
       <select id="years" multiple size="5"></select>
     </section>
     <section class="search-panel">
-      <label class="quick-label" for="query">Quick search</label>
+      <label class="quick-label" for="query"><u>Q</u>uick search <span class="shortcut-hint">Ctrl+Q</span></label>
       <input id="query" type="search" placeholder="Filename, date, classification…">
       <label class="duplicates">
-        <input id="duplicates" type="checkbox"> Duplicates only <span class="count" id="duplicateCount">0</span>
+        <input id="duplicates" type="checkbox"> <u>D</u>uplicates only <span class="shortcut-hint">Ctrl+Shift+D</span> <span class="count" id="duplicateCount">0</span>
       </label>
       <button type="button" class="action" id="cleanDuplicatesButton" hidden>Clean Duplicates</button>
       <button type="button" class="action" id="resetFilters">Reset filters</button>
     </section>
     <section class="tag-panel">
-      <label for="tagSearch">Tags</label>
+      <label for="tagSearch"><u>F</u>ilter tags <span class="shortcut-hint">Ctrl+F</span></label>
       <div class="tag-row">
         <input id="tagSearch" class="tag-search" type="search" placeholder="Filter tags…">
         <div class="chips" id="tags"></div>
@@ -63,7 +63,7 @@
       </div>
       <div id="detailsEditor" hidden>
         <details class="collapsible" id="detailsSection" open>
-          <summary>Details</summary>
+          <summary><u>D</u>etails <span class="shortcut-hint">Ctrl+D</span></summary>
           <div class="editor-grid">
             <div class="file-fields">
               <div class="editor">
@@ -80,7 +80,7 @@
               <textarea id="summaryInput"></textarea>
             </div>
             <div class="editor file-tags">
-              <span class="inferred-label">Document tags</span>
+              <span class="inferred-label">Document <u>t</u>ags <span class="shortcut-hint">Ctrl+T</span></span>
               <div class="document-tags">
                 <div id="documentTags"></div>
                 <input id="tagInput" class="document-tag-input" placeholder="Add tag + Enter">
@@ -89,7 +89,7 @@
           </div>
         </details>
         <details class="collapsible" id="metaSection">
-          <summary>Metadata &amp; OCR</summary>
+          <summary><u>M</u>etadata &amp; OCR <span class="shortcut-hint">Ctrl+M</span></summary>
           <section class="meta-panel" id="metaPanel">
             <div class="meta-values" id="metaValues"></div>
             <label class="editor" for="ocrText">OCR text</label>
@@ -114,11 +114,11 @@
     <span><span class="dot" id="ollamaDot"></span> <span id="ollamaStatus">Checking Ollama…</span></span>
     <span id="modelStatus"></span>
     <div class="footer-actions">
-      <button class="icon-button" id="settingsButton" title="Tag settings" aria-label="Tag settings">⚙</button>
-      <button class="scan-button" id="scanNow">Re-Scan all</button>
-      <button class="scan-button" id="stopScan" hidden>Stop Scan</button>
-      <button class="scan-button" id="pausePipeline">Pause pipeline</button>
-      <button class="footer-toggle" id="pipelineToggle" title="Expand pipeline" aria-label="Expand pipeline">⌃</button>
+      <button class="icon-button" id="settingsButton" title="Settings (Ctrl+S)" aria-label="Settings (Ctrl+S)">⚙ <span class="shortcut-hint">Ctrl+S</span></button>
+      <button class="scan-button" id="scanNow">Re-<u>S</u>can all <span class="shortcut-hint">Ctrl+R</span></button>
+      <button class="scan-button" id="stopScan" hidden><u>S</u>top Scan <span class="shortcut-hint">Ctrl+Shift+S</span></button>
+      <button class="scan-button" id="pausePipeline"><u>P</u>ause pipeline <span class="shortcut-hint">Ctrl+P</span></button>
+      <button class="footer-toggle" id="pipelineToggle" title="Expand pipeline (Ctrl+Space)" aria-label="Expand pipeline (Ctrl+Space)">⌃ <span class="shortcut-hint">Ctrl+Space</span></button>
     </div>
   </div>
   <div class="pipeline" id="pipeline">

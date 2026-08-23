@@ -130,3 +130,4 @@ html[data-theme="aurora"] .theme-desc{color:#6c70a0}
 .file-tags .document-tags>#documentTags{flex:1 1 auto;min-width:0}
 .search-panel{gap:6px}
 .search-panel .duplicates{margin-top:0}
+.shortcut-hint{margin-left:4px;color:inherit;font-size:10px;font-weight:400;letter-spacing:0;opacity:.62;text-decoration:none;text-transform:none;white-space:nowrap}

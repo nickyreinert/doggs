@@ -256,7 +256,7 @@ async function rerunPipeline() {
     const job = details?.normal_scan || {};
     if (['queued', 'running'].includes(job.state)) { $('editorStatus').textContent = 'LLM extraction is running…'; continue }
     button.disabled = false;
-    if (job.state === 'complete') { await refresh(); $('editorStatus').textContent = 'Extracted fields updated; custom tags kept.'; return }
+    if (job.state === 'complete') { await refresh(); $('editorStatus').textContent = 'Extracted fields and archive filename updated; custom tags kept.'; return }
     $('editorStatus').textContent = job.error || 'LLM extraction did not complete.';
     return;
   }
@@ -565,7 +565,7 @@ $('saveOcr').onclick = saveOcr;
 $('closeDuplicatesButton').onclick = () => closeDuplicates(true);
 $('pipelineToggle').onclick = togglePipeline;
 $('scanNow').onclick = async () => {
-  if (!confirm('Re-scan every indexed document? This runs quick OCR and LLM classification for all documents.')) return;
+  if (!confirm('Re-scan every indexed document? This runs quick OCR and LLM classification, then corrects generated archive filenames.')) return;
   const button = $('scanNow');
   button.disabled = true;
   const r = await fetch('/api/rescan', { method: 'POST' });
@@ -588,10 +588,51 @@ $('settingsDialog').addEventListener('close', () => syncUrl());
 $('settingsForm').onsubmit = saveSettings;
 $('scheduleMode').onchange = updateScheduleFields;
 document.addEventListener('keydown', event => {
-  if (!['ArrowUp', 'ArrowDown'].includes(event.key) || event.defaultPrevented || $('settingsDialog').open) return;
-  if (event.target.closest('input, textarea, select, button, [contenteditable="true"]')) return;
+  if (event.defaultPrevented || $('settingsDialog').open) return;
+  const key = event.key.toLowerCase();
+  if (event.ctrlKey && !event.metaKey && !event.altKey) {
+    if (key === 't' && state.selected && !$('detailsEditor').hidden) {
+      event.preventDefault();
+      $('tagInput').focus();
+    } else if (key === 'd' && event.shiftKey) {
+      event.preventDefault();
+      $('duplicates').click();
+    } else if (key === 'd') {
+      event.preventDefault();
+      $('detailsSection').open = !$('detailsSection').open;
+    } else if (key === 'm') {
+      event.preventDefault();
+      $('metaSection').open = !$('metaSection').open;
+    } else if (key === 'q') {
+      event.preventDefault();
+      $('query').focus();
+    } else if (key === 'f') {
+      event.preventDefault();
+      $('tagSearch').focus();
+    } else if (key === 'y') {
+      event.preventDefault();
+      $('years').focus();
+    } else if (key === 's' && event.shiftKey) {
+      event.preventDefault();
+      if (!$('stopScan').hidden) $('stopScan').click();
+    } else if (key === 's') {
+      event.preventDefault();
+      $('settingsButton').click();
+    } else if (key === 'r') {
+      event.preventDefault();
+      $('scanNow').click();
+    } else if (key === 'p') {
+      event.preventDefault();
+      $('pausePipeline').click();
+    } else if (key === ' ') {
+      event.preventDefault();
+      togglePipeline();
+    }
+    return;
+  }
+  if (!['arrowup', 'arrowdown'].includes(key) || event.target.closest('input, textarea, select, button, [contenteditable="true"]')) return;
   event.preventDefault();
-  selectAdjacentFile(event.key === 'ArrowDown' ? 1 : -1);
+  selectAdjacentFile(key === 'arrowdown' ? 1 : -1);
 });
 document.querySelectorAll('.settings-tab').forEach(button => button.onclick = () => showSettingsTab(button.dataset.tab));
 

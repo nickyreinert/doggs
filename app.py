@@ -373,6 +373,24 @@ def replace_extracted_result(row, heuristic, extracted, text):
     row["slug"] = slugify("-".join(tags[:3]) or heuristic["slug"])
     return row
 
+def update_generated_filename(row):
+    """Keep an archived PDF's filename aligned with regenerated date and slug metadata."""
+    if row.get("location") != "archive": return
+    document_date = parse_any_date(row.get("date"))
+    if not document_date: return
+    current_path = file_path_for_row(row)
+    destination = ARCHIVE_DIR / str(row.get("year") or document_date.year) / f"{document_date.isoformat()}_{row['slug']}.pdf"
+    if current_path != destination.resolve():
+        destination = unique_path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(current_path), destination)
+    row["stored_path"] = destination.relative_to(ARCHIVE_DIR).as_posix()
+
+def replace_extracted_result_and_filename(row, heuristic, extracted, text):
+    replace_extracted_result(row, heuristic, extracted, text)
+    update_generated_filename(row)
+    return row
+
 def ai_extract(text):
     if AI_MODE != "ollama" or len(text.strip()) < 20: return {}
     prompt = read_settings()["prompts"]["metadata"]
@@ -453,7 +471,7 @@ def run_normal_pipeline(row_id):
         analysis = f"{metadata} {text}".strip()
         heuristic, extracted = heuristic_extract(analysis, path.name), ai_extract(analysis)
         def apply_extraction(item):
-            replace_extracted_result(item, heuristic, extracted, analysis)
+            replace_extracted_result_and_filename(item, heuristic, extracted, analysis)
             item["source"] = source
         if not mutate_row(row_id, apply_extraction): raise ValueError("Document no longer exists in the index.")
         NORMAL_SCAN_STATE[row_id] = {"state": "complete", "error": ""}
@@ -472,7 +490,7 @@ def run_llm_rerun(row_ids):
                     metadata = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
                 text, _ = extract_normal_text(file_path_for_row(row)); analysis = f"{metadata} {text}".strip()
                 heuristic, extracted = heuristic_extract(analysis, Path(row["stored_path"]).name), ai_extract(analysis)
-                if not mutate_row(row_id, lambda item: replace_extracted_result(item, heuristic, extracted, analysis)):
+                if not mutate_row(row_id, lambda item: replace_extracted_result_and_filename(item, heuristic, extracted, analysis)):
                     raise ValueError("Document no longer exists in the index.")
             LLM_RERUN_STATE["current"] += 1
         LLM_RERUN_STATE["state"] = "complete"
@@ -506,7 +524,7 @@ def run_bulk_rescan(row_ids):
                 analysis = f"{metadata} {text}".strip()
                 heuristic, extracted = heuristic_extract(analysis, path.name), ai_extract(analysis)
                 def apply_extraction(item):
-                    replace_extracted_result(item, heuristic, extracted, analysis)
+                    replace_extracted_result_and_filename(item, heuristic, extracted, analysis)
                     item["ocr_text"] = text; item["source"] = "quick-ocr"
                 if not mutate_row(row_id, apply_extraction): raise ValueError("Document no longer exists in the index.")
             except Exception as exc:
