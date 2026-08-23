@@ -50,7 +50,7 @@
     <div class="preview-head">
       <div class="preview-head-top">
         <div class="preview-head-info">
-          <div class="document-title" id="documentTitle">Select a document</div>
+          <div class="document-title" id="documentTitle" contenteditable="true" role="textbox" aria-label="Document title">Select a document</div>
           <div class="document-meta" id="documentMeta">Its details and preview will appear here.</div>
         </div>
         <div class="editor-actions" id="editorActions" hidden>
@@ -74,17 +74,17 @@
                 <label>Filename</label>
                 <input id="filenameInput">
               </div>
-              <div class="editor file-tags">
-                <span class="inferred-label">Document tags</span>
-                <div class="document-tags">
-                  <div id="documentTags"></div>
-                  <input id="tagInput" class="document-tag-input" placeholder="Add tag + Enter">
-                </div>
-              </div>
             </div>
             <div class="editor">
               <label>Summary</label>
               <textarea id="summaryInput"></textarea>
+            </div>
+            <div class="editor file-tags">
+              <span class="inferred-label">Document tags</span>
+              <div class="document-tags">
+                <div id="documentTags"></div>
+                <input id="tagInput" class="document-tag-input" placeholder="Add tag + Enter">
+              </div>
             </div>
           </div>
         </details>
@@ -115,7 +115,7 @@
     <span id="modelStatus"></span>
     <div class="footer-actions">
       <button class="icon-button" id="settingsButton" title="Tag settings" aria-label="Tag settings">⚙</button>
-      <button class="scan-button" id="scanNow">Scan now</button>
+      <button class="scan-button" id="scanNow">Re-Scan all</button>
       <button class="scan-button" id="pausePipeline">Pause pipeline</button>
       <button class="footer-toggle" id="pipelineToggle" title="Expand pipeline" aria-label="Expand pipeline">⌃</button>
     </div>

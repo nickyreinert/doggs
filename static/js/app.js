@@ -117,6 +117,7 @@ function renderFiles(list) {
       const dupeCount = f.duplicate_count || 0;
       const b = document.createElement('button');
       b.className = 'file' + (state.selected?.id === f.id ? ' active' : '');
+      b.dataset.fileId = f.id;
       b.innerHTML = '<div class="title"></div><div class="meta"></div><div class="summary"></div>';
       b.querySelector('.title').textContent = f.name;
       b.querySelector('.meta').textContent = [f.date || 'no date', f.classification || 'document', f.is_duplicate ? 'duplicate' : ''].filter(Boolean).join(' • ');
@@ -134,6 +135,15 @@ function renderFiles(list) {
     });
     e.append(g);
   });
+}
+
+function selectAdjacentFile(direction) {
+  const cards = [...document.querySelectorAll('#files .file')];
+  if (!cards.length) return;
+  const current = cards.findIndex(card => card.dataset.fileId === state.selected?.id);
+  const next = current < 0 ? (direction > 0 ? 0 : cards.length - 1) : Math.max(0, Math.min(cards.length - 1, current + direction));
+  cards[next].scrollIntoView({ block: 'nearest' });
+  cards[next].click();
 }
 
 function clearSelection(updateUrl = true) {
@@ -209,7 +219,7 @@ function selectFile(f, load = true, updateUrl = true) {
 
 async function saveDetails() {
   if (!state.selected) return;
-  const r = await fetch('/api/file/' + encodeURIComponent(state.selected.id), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ summary: $('summaryInput').value, year: $('yearInput').value, filename: $('filenameInput').value }) });
+  const r = await fetch('/api/file/' + encodeURIComponent(state.selected.id), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: $('documentTitle').textContent.trim(), summary: $('summaryInput').value, year: $('yearInput').value, filename: $('filenameInput').value }) });
   $('editorStatus').textContent = r.ok ? 'Saved.' : 'Could not save details.';
   if (r.ok) refresh();
 }
@@ -386,7 +396,9 @@ async function refreshStatus() {
     $('ollamaDot').className = 'dot ' + (s.ollama_connected ? 'ok' : 'warn');
     $('ollamaStatus').textContent = s.ollama_connected ? 'Ollama connected' : s.error || 'Ollama unavailable';
     $('modelStatus').textContent = 'Model: ' + s.model;
-    $('pipelineCount').textContent = 'Pipeline · ' + p.waiting_count + ' waiting' + (p.paused ? (p.processing ? ' · finishing current file' : ' · paused') : '') + (!p.paused && p.processing ? ' · processing ' + p.processing : '');
+    const rescan = d.rescan || {};
+    const rescanProgress = rescan.state === 'running' ? ' · re-scanning ' + rescan.current + '/' + rescan.total : '';
+    $('pipelineCount').textContent = 'Pipeline · ' + p.waiting_count + ' waiting' + (p.paused ? (p.processing ? ' · finishing current file' : ' · paused') : '') + (!p.paused && p.processing ? ' · processing ' + p.processing : '') + rescanProgress;
     $('pausePipeline').textContent = p.paused ? 'Resume pipeline' : 'Pause pipeline';
     $('ocrStatus').textContent = 'OCR ' + s.ocr_language + ': ' + (s.ocr_available ? 'available' : 'missing');
     $('pipelineList').innerHTML = p.waiting.length ? p.waiting.map(x => '<li>' + x.name + ' · ' + Math.ceil(x.size / 1024) + ' KB · ' + x.state + '</li>').join('') : '<li>No PDFs waiting in the inbox.</li>';
@@ -517,6 +529,7 @@ $('query').oninput = e => { state.q = e.target.value.trim(); syncUrl(); clearTim
 $('tagSearch').oninput = () => renderTags(visibleTags);
 $('tagAliasSearch').oninput = renderTagAliases;
 $('tagInput').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); addDocumentTag() } };
+$('documentTitle').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur() } };
 $('duplicates').onchange = e => { state.duplicates = e.target.checked; $('cleanDuplicatesButton').hidden = !state.duplicates; syncUrl(true); refresh() };
 $('resetFilters').onclick = () => {
   state.q = ''; state.years = new Set(); state.tags = new Set(); state.duplicates = false;
@@ -537,13 +550,27 @@ $('runLlm').onclick = rerunPipeline;
 $('saveOcr').onclick = saveOcr;
 $('closeDuplicatesButton').onclick = () => closeDuplicates(true);
 $('pipelineToggle').onclick = togglePipeline;
-$('scanNow').onclick = async () => { await fetch('/api/scan', { method: 'POST' }); setTimeout(() => { refresh(); refreshStatus() }, 700) };
+$('scanNow').onclick = async () => {
+  if (!confirm('Re-scan every indexed document? This runs quick OCR and LLM classification for all documents.')) return;
+  const button = $('scanNow');
+  button.disabled = true;
+  const r = await fetch('/api/rescan', { method: 'POST' });
+  button.disabled = false;
+  if (!r.ok) { alert('Could not start the re-scan.'); return }
+  refreshStatus();
+};
 $('pausePipeline').onclick = async () => { await fetch('/api/pipeline/pause', { method: 'POST' }); refreshStatus() };
 $('settingsButton').onclick = () => openSettings(true);
 $('cancelSettings').onclick = () => $('settingsDialog').close();
 $('settingsDialog').addEventListener('close', () => syncUrl());
 $('settingsForm').onsubmit = saveSettings;
 $('scheduleMode').onchange = updateScheduleFields;
+document.addEventListener('keydown', event => {
+  if (!['ArrowUp', 'ArrowDown'].includes(event.key) || event.defaultPrevented || $('settingsDialog').open) return;
+  if (event.target.closest('input, textarea, select, button, [contenteditable="true"]')) return;
+  event.preventDefault();
+  selectAdjacentFile(event.key === 'ArrowDown' ? 1 : -1);
+});
 document.querySelectorAll('.settings-tab').forEach(button => button.onclick = () => showSettingsTab(button.dataset.tab));
 
 (() => {

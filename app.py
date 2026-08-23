@@ -69,6 +69,7 @@ FULL_SCAN_STATE = {}
 OCR_SCAN_STATE = {}
 NORMAL_SCAN_STATE = {}
 LLM_RERUN_STATE = {"state": "idle", "current": 0, "total": 0, "error": ""}
+RESCAN_STATE = {"state": "idle", "current": 0, "total": 0, "error": ""}
 SCHEDULE_STATE = {"last_interval": 0.0, "daily_runs": set()}
 LEGACY_METADATA_PROMPT = "Return JSON: date (YYYY-MM-DD|null), classification (one lowercase word such as invoice), tags (array of 2-5 short lowercase hyphenated tags), slug (2-5 lowercase hyphenated words based on the useful tags), summary (one accurate <=160-character sentence). For a German invoice, tags should resemble rechnung, firma-sattig, darmstadt, rechnungsdatum — never fpdf, pdflib, printer, php, or linux."
 DEFAULT_METADATA_PROMPT = """Extract metadata only from the supplied document text. Return one JSON object and nothing else:
@@ -477,6 +478,35 @@ def run_llm_rerun(row_ids):
     except Exception as exc:
         log.exception("LLM rerun failed"); LLM_RERUN_STATE.update(state="error", error=str(exc))
 
+def run_bulk_rescan(row_ids):
+    RESCAN_STATE.update(state="running", current=0, total=len(row_ids), error="")
+    try:
+        for row_id in row_ids:
+            rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
+            if not row:
+                RESCAN_STATE["current"] += 1; continue
+            path = file_path_for_row(row)
+            try:
+                with fitz.open(path) as doc:
+                    pdf_metadata = extract_pdf_metadata(doc)
+                text = ocr_text(path, all_pages=False)
+                if not text: raise ValueError("OCR returned no text.")
+                metadata = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
+                analysis = f"{metadata} {text}".strip()
+                heuristic, extracted = heuristic_extract(analysis, path.name), ai_extract(analysis)
+                def apply_extraction(item):
+                    replace_extracted_result(item, heuristic, extracted, analysis)
+                    item["ocr_text"] = text; item["source"] = "quick-ocr"
+                if not mutate_row(row_id, apply_extraction): raise ValueError("Document no longer exists in the index.")
+            except Exception as exc:
+                log.exception("Bulk rescan failed for %s", row_id)
+                RESCAN_STATE["error"] = f"{path.name}: {exc}"
+            finally:
+                RESCAN_STATE["current"] += 1
+        RESCAN_STATE["state"] = "complete"
+    except Exception as exc:
+        log.exception("Bulk rescan failed"); RESCAN_STATE.update(state="error", error=str(exc))
+
 def process_file(path):
     file_hash, rows = sha256_file(path), read_rows()
     original = next((row for row in rows if row.get("file_hash") == file_hash and row.get("location") != "duplicates"), None)
@@ -603,6 +633,7 @@ def update_file(row_id):
     if not row: abort(404)
     if "tags" in payload:
         row["tags"] = " ".join(dict.fromkeys(slugify(tag) for tag in re.split(r"[\s,]+", str(payload["tags"])) if tag and slugify(tag) != "document"))
+    if "title" in payload: row["pdf_title"] = re.sub(r"\s+", " ", str(payload["title"])).strip()[:500]
     if "summary" in payload: row["summary"] = str(payload["summary"]).strip()[:4000]
     if "year" in payload or "filename" in payload:
         current_path = file_path_for_row(row)
@@ -710,7 +741,7 @@ def rerun_file_pipeline(row_id):
 def api_status():
     """Report local service configuration without making Ollama a dependency."""
     now = time.monotonic()
-    if STATUS_CACHE["payload"] and now - STATUS_CACHE["checked_at"] < 15:
+    if STATUS_CACHE["payload"] and now - STATUS_CACHE["checked_at"] < 15 and RESCAN_STATE["state"] not in {"queued", "running"}:
         return jsonify(STATUS_CACHE["payload"])
 
     available, error = [], ""
@@ -746,6 +777,7 @@ def api_status():
         "ocr_available": all(language in ocr_languages for language in OCR_LANGS),
         "pipeline": {"waiting": waiting[:30], "waiting_count": len(waiting), "schedule": read_settings()["schedule"], **PIPELINE_STATE},
         "llm_rerun": LLM_RERUN_STATE,
+        "rescan": RESCAN_STATE,
     }
     STATUS_CACHE.update(checked_at=now, payload=payload)
     return jsonify(payload)
@@ -756,6 +788,15 @@ def api_scan():
         return jsonify({"started": False, "message": "A scan is already in progress."}), 409
     STATUS_CACHE["payload"] = None
     threading.Thread(target=scan_incoming, daemon=True).start()
+    return jsonify({"started": True})
+
+@app.post("/api/rescan")
+def api_rescan():
+    if RESCAN_STATE["state"] in {"queued", "running"}: return jsonify({"started": False, "message": "A re-scan is already in progress."}), 409
+    row_ids = [row["id"] for row in read_rows()]
+    RESCAN_STATE.update(state="queued", current=0, total=len(row_ids), error="")
+    STATUS_CACHE["payload"] = None
+    threading.Thread(target=run_bulk_rescan, args=(row_ids,), daemon=True).start()
     return jsonify({"started": True})
 
 @app.post("/api/pipeline/pause")
