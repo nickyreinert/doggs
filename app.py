@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import re
 import shutil
@@ -20,8 +21,11 @@ import pymupdf as fitz
 import pytesseract
 import requests
 from dateutil import parser as dateparser
+from docx import Document
 from flask import Flask, abort, jsonify, render_template, request, send_file
+from openpyxl import load_workbook
 from PIL import Image
+from pptx import Presentation
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -52,7 +56,11 @@ AI_MODE, OLLAMA_URL = os.getenv("AI_MODE", "ollama"), os.getenv("OLLAMA_URL", "h
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:3b")
 DATE_DAYFIRST = os.getenv("DATE_DAYFIRST", "1") == "1"
 MAX_TOKEN_FACETS = int(os.getenv("MAX_TOKEN_FACETS", "80"))
-FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "summary", "tokens", "removed_tags", "tags", "ocr_text", "is_duplicate", "duplicate_of", "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer", "source", "created_at"]
+TEXT_FORMATS = {".docx", ".txt", ".xlsx", ".csv", ".pptx"}
+SUPPORTED_FORMATS = {".pdf", *TEXT_FORMATS}
+LLM_SOURCE_LINES = int(os.getenv("LLM_SOURCE_LINES", "80"))
+DEFAULT_CATEGORIES = ["financial-document", "invoice", "incoming", "outgoing", "banking", "tax-office", "insurance", "contract", "personal", "misc"]
+FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "category", "summary", "tokens", "removed_tags", "tags", "ocr_text", "is_duplicate", "duplicate_of", "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer", "source", "created_at"]
 STOP_TAGS = {"the", "and", "for", "doc", "document", "pdf", "misc", "unknown", "fpdf", "pdflib", "printer", "linux", "php", "kunde", "page", "pages", "creator", "producer"}
 PROMPT_STOP_WORDS = STOP_TAGS | {"a", "an", "are", "as", "at", "be", "by", "from", "in", "is", "it", "of", "on", "or", "that", "this", "to", "with", "der", "die", "das", "den", "dem", "des", "ein", "eine", "einer", "einem", "einen", "und", "oder", "ist", "im", "in", "am", "an", "auf", "von", "für", "mit", "zu", "bei", "als", "auch", "nicht", "wie", "dass"}
 CLASSIFICATION_RULES = [("invoice", ["invoice", "rechnung", "billing", "amount due", "zahlung"]), ("bank", ["bank statement", "kontoauszug", "iban", "balance", "transaction"]), ("insurance", ["insurance", "versicherung", "policy", "claim", "premium"]), ("contract", ["contract", "agreement", "vertrag", "terms"]), ("tax", ["tax", "steuer", "finanzamt", "vat"]), ("medical", ["medical", "arzt", "doctor", "patient"]), ("utility", ["electricity", "gas", "water", "internet", "phone"]), ("salary", ["salary", "payroll", "gehalt", "lohn"]), ("official", ["authority", "bescheid", "government", "court"]), ("receipt", ["receipt", "quittung", "purchase"])]
@@ -80,6 +88,7 @@ You are an expert data extractor. Your ONLY output must be a valid, raw JSON obj
 Analyze the provided OCR document text and extract data strictly following these rules:
 - date: The primary document date in YYYY-MM-DD format (use null if not found).
 - classification: One lowercase category word (e.g., invoice, letter, receipt).
+- category: One configured high-level document category.
 - tags: Array of 2 to 5 lowercase-hyphenated specific facts found in the text (e.g., actual sender, city). Do not guess, make up tags, or use OCR/software artifact names.
 - slug: 2 to 5 lowercase-hyphenated words identifying the document.
 - summary: A single, accurate summary paragraph (maximum 160 characters).
@@ -88,6 +97,7 @@ JSON Template:
 {
   "date": null,
   "classification": "",
+    "category": "",
   "tags": [],
   "slug": "",
   "summary": ""
@@ -185,7 +195,8 @@ def read_settings():
     aliases = {slugify(key): slugify(value) for key, value in (data.get("tag_aliases") or {}).items() if slugify(key) and slugify(value) and slugify(key) != slugify(value)}
     raw_general = data.get("general")
     general = {**current_general_defaults(), **(raw_general or {})}
-    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "tag_aliases": aliases, "general": general, "general_configured": general_is_configured(raw_general), "general_locked": general_locked_fields(), "prompts": {"metadata": metadata_prompt, "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
+    categories = list(dict.fromkeys(tag_values(data.get("categories", DEFAULT_CATEGORIES)))) or list(DEFAULT_CATEGORIES)
+    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "tag_aliases": aliases, "categories": categories, "general": general, "general_configured": general_is_configured(raw_general), "general_locked": general_locked_fields(), "prompts": {"metadata": metadata_prompt, "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
 
 def write_settings(settings):
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -351,6 +362,48 @@ def extract_normal_text(path):
         return re.sub(r"\s+", " ", text).strip()[:MAX_SOURCE_CHARS], source
     finally: doc.close()
 
+def extract_text_document(path):
+    """Extract readable text from supported non-PDF formats without altering their bytes."""
+    suffix = path.suffix.lower()
+    if suffix == ".txt":
+        text = path.read_text(encoding="utf-8", errors="replace")
+    elif suffix == ".csv":
+        with path.open(newline="", encoding="utf-8-sig", errors="replace") as file:
+            text = "\n".join(" | ".join(cell.strip() for cell in row) for row in csv.reader(file))
+    elif suffix == ".docx":
+        document = Document(path)
+        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        text += "\n" + "\n".join(" | ".join(str(cell.text) for cell in row.cells) for table in document.tables for row in table.rows)
+    elif suffix == ".xlsx":
+        workbook = load_workbook(path, read_only=True, data_only=True)
+        try:
+            text = "\n".join(
+                f"[{sheet.title}]\n" + "\n".join(" | ".join("" if value is None else str(value) for value in row) for row in sheet.iter_rows(values_only=True))
+                for sheet in workbook.worksheets
+            )
+        finally:
+            workbook.close()
+    elif suffix == ".pptx":
+        presentation = Presentation(path)
+        text = "\n".join(
+            "\n".join(shape.text for shape in slide.shapes if hasattr(shape, "text") and shape.text.strip())
+            for slide in presentation.slides
+        )
+    else:
+        raise ValueError(f"Unsupported document format: {suffix}")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return "\n".join(lines[-LLM_SOURCE_LINES:])[:MAX_FULL_TEXT_CHARS], f"{suffix.removeprefix('.')}-text"
+
+def document_content(path):
+    if path.suffix.lower() == ".pdf":
+        with fitz.open(path) as document:
+            metadata = extract_pdf_metadata(document)
+            pdf_date = parse_pdf_date(document)
+        text, source = extract_normal_text(path)
+        return text, source, metadata, pdf_date
+    text, source = extract_text_document(path)
+    return text, source, {key: "" for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer")}, None
+
 def parse_text_date(text):
     for match in re.finditer(r"\b(\d{4})[-./](\d{1,2})[-./](\d{1,2})\b", text):
         if parsed := valid_date(*match.groups()): return parsed
@@ -396,6 +449,8 @@ def replace_extracted_result(row, heuristic, extracted, text):
     """Replace generated fields only; the user's manual `tags` field is immutable here."""
     tags = combined_tags(heuristic, extracted, text)
     row["classification"] = slugify(heuristic["classification"] if heuristic["classification"] != "document" else extracted.get("classification") or "document")
+    categories = read_settings()["categories"]
+    row["category"] = slugify(extracted.get("category")) if slugify(extracted.get("category")) in categories else "misc"
     row["summary"] = (heuristic["summary"] if heuristic["classification"] == "invoice" else extracted.get("summary") or heuristic["summary"]).strip()[:240]
     row["tokens"] = " ".join(tags)
     row["removed_tags"] = ""
@@ -403,12 +458,13 @@ def replace_extracted_result(row, heuristic, extracted, text):
     return row
 
 def update_generated_filename(row):
-    """Keep an archived PDF's filename aligned with regenerated date and slug metadata."""
+    """Keep an archived document's filename aligned with regenerated date and slug metadata."""
     if row.get("location") != "archive": return
     document_date = parse_any_date(row.get("date"))
     if not document_date: return
     current_path = file_path_for_row(row)
-    destination = ARCHIVE_DIR / str(row.get("year") or document_date.year) / f"{document_date.isoformat()}_{row['slug']}.pdf"
+    suffix = current_path.suffix.lower() or ".pdf"
+    destination = ARCHIVE_DIR / str(row.get("year") or document_date.year) / f"{document_date.isoformat()}_{row['slug']}{suffix}"
     if current_path != destination.resolve():
         destination = unique_path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -420,14 +476,16 @@ def replace_extracted_result_and_filename(row, heuristic, extracted, text):
     update_generated_filename(row)
     return row
 
-def ai_extract(text):
+def ai_extract(text, preserve_lines=False):
     if AI_MODE != "ollama" or len(text.strip()) < 20: return {}
-    prompt = read_settings()["prompts"]["metadata"]
-    payload = {"model": AI_MODEL, "stream": False, "format": "json", "options": {"temperature": 0, "num_predict": 260}, "messages": [{"role": "system", "content": "Return only valid JSON. Every extracted tag must be grounded in the supplied document text. Never copy names, places, or tag values from instructions. Omit uncertain data instead of guessing. Ignore PDF generators, software names, headers/footers, and OCR garbage. Write the summary in the document language."}, {"role": "user", "content": prompt + "\n\nDocument evidence (common stop words removed):\n" + compact_prompt_text(text)}]}
+    settings = read_settings(); prompt, categories = settings["prompts"]["metadata"], settings["categories"]
+    category_instruction = "Choose category as exactly one of: " + ", ".join(categories) + "."
+    evidence = text.strip()[:MAX_FULL_TEXT_CHARS] if preserve_lines else compact_prompt_text(text)
+    payload = {"model": AI_MODEL, "stream": False, "format": "json", "options": {"temperature": 0, "num_predict": 260}, "messages": [{"role": "system", "content": "Return only valid JSON. Every extracted tag must be grounded in the supplied document text. Never copy names, places, or tag values from instructions. Omit uncertain data instead of guessing. Ignore PDF generators, software names, headers/footers, and OCR garbage. Write the summary in the document language. " + category_instruction}, {"role": "user", "content": prompt + "\n\nAdd a category field to the JSON response.\n\nDocument evidence:\n" + evidence}]}
     try:
         raw = requests.post(f"{OLLAMA_URL.rstrip('/')}/api/chat", json=payload, timeout=AI_TIMEOUT).json().get("message", {}).get("content", "")
         match = re.search(r"\{.*\}", raw, re.S); data = json.loads(match.group() if match else raw)
-        extracted = {key: str(value).strip() for key, value in data.items() if key in {"date", "classification", "slug", "summary"} and value not in (None, "", "null", "unknown")}
+        extracted = {key: str(value).strip() for key, value in data.items() if key in {"date", "classification", "category", "slug", "summary"} and value not in (None, "", "null", "unknown")}
         extracted["tags"] = tag_values(data.get("tags", []))
         return extracted
     except Exception:
@@ -493,12 +551,11 @@ def run_normal_pipeline(row_id):
         rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
         if not row: raise ValueError("Document no longer exists in the index.")
         path = file_path_for_row(row)
-        with fitz.open(path) as doc:
-            pdf_metadata = extract_pdf_metadata(doc)
-        metadata = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
-        text, source = (row.get("ocr_text", ""), "saved-ocr") if row.get("ocr_text", "").strip() else extract_normal_text(path)
+        text, source, metadata_fields, _ = document_content(path)
+        if row.get("ocr_text", "").strip() and path.suffix.lower() == ".pdf": text, source = row["ocr_text"], "saved-ocr"
+        metadata = " ".join(metadata_fields[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if metadata_fields.get(key))
         analysis = f"{metadata} {text}".strip()
-        heuristic, extracted = heuristic_extract(analysis, path.name), ai_extract(analysis)
+        heuristic, extracted = heuristic_extract(analysis, path.name), ai_extract(analysis, path.suffix.lower() != ".pdf")
         def apply_extraction(item):
             replace_extracted_result_and_filename(item, heuristic, extracted, analysis)
             item["source"] = source
@@ -514,11 +571,10 @@ def run_llm_rerun(row_ids):
         for row_id in row_ids:
             rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
             if row:
-                with fitz.open(file_path_for_row(row)) as doc:
-                    pdf_metadata = extract_pdf_metadata(doc)
-                    metadata = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
-                text, _ = extract_normal_text(file_path_for_row(row)); analysis = f"{metadata} {text}".strip()
-                heuristic, extracted = heuristic_extract(analysis, Path(row["stored_path"]).name), ai_extract(analysis)
+                text, _, metadata_fields, _ = document_content(file_path_for_row(row))
+                metadata = " ".join(metadata_fields[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if metadata_fields.get(key))
+                analysis = f"{metadata} {text}".strip()
+                heuristic, extracted = heuristic_extract(analysis, Path(row["stored_path"]).name), ai_extract(analysis, Path(row["stored_path"]).suffix.lower() != ".pdf")
                 if not mutate_row(row_id, lambda item: replace_extracted_result_and_filename(item, heuristic, extracted, analysis)):
                     raise ValueError("Document no longer exists in the index.")
             LLM_RERUN_STATE["current"] += 1
@@ -545,16 +601,19 @@ def run_bulk_rescan(row_ids):
             path = file_path_for_row(row)
             RESCAN_STATE["processing"] = path.name
             try:
-                with fitz.open(path) as doc:
-                    pdf_metadata = extract_pdf_metadata(doc)
-                text = ocr_text(path, all_pages=False)
-                if not text: raise ValueError("OCR returned no text.")
-                metadata = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
+                if path.suffix.lower() == ".pdf":
+                    text = ocr_text(path, all_pages=False)
+                    if not text: raise ValueError("OCR returned no text.")
+                    with fitz.open(path) as doc: metadata_fields = extract_pdf_metadata(doc)
+                    source = "quick-ocr"
+                else:
+                    text, source, metadata_fields, _ = document_content(path)
+                metadata = " ".join(metadata_fields[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if metadata_fields.get(key))
                 analysis = f"{metadata} {text}".strip()
-                heuristic, extracted = heuristic_extract(analysis, path.name), ai_extract(analysis)
+                heuristic, extracted = heuristic_extract(analysis, path.name), ai_extract(analysis, path.suffix.lower() != ".pdf")
                 def apply_extraction(item):
                     replace_extracted_result_and_filename(item, heuristic, extracted, analysis)
-                    item["ocr_text"] = text; item["source"] = "quick-ocr"
+                    item["ocr_text"] = text; item["source"] = source
                 if not mutate_row(row_id, apply_extraction): raise ValueError("Document no longer exists in the index.")
             except Exception as exc:
                 log.exception("Bulk rescan failed for %s", row_id)
@@ -572,22 +631,18 @@ def process_file(path):
         destination = unique_path(DUPLICATE_DIR / path.name); shutil.move(str(path), destination)
         rows.append({**original, "id": f"{file_hash[:12]}-{int(time.time() * 1000)}", "original_name": path.name, "stored_path": destination.relative_to(DUPLICATE_DIR).as_posix(), "location": "duplicates", "is_duplicate": "1", "duplicate_of": original.get("id", ""), "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
         write_rows(rows); log.info("Stored duplicate %s", destination); return
-    try:
-        with fitz.open(path) as doc:
-            pdf_date = parse_pdf_date(doc)
-            pdf_metadata = extract_pdf_metadata(doc)
-        text, source = extract_normal_text(path)
-    except Exception: raise
+    text, source, pdf_metadata, pdf_date = document_content(path)
     metadata_text = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
     analysis_text = f"{metadata_text} {text}".strip()
-    heuristics, ai = heuristic_extract(analysis_text, path.name), ai_extract(analysis_text)
+    heuristics, ai = heuristic_extract(analysis_text, path.name), ai_extract(analysis_text, path.suffix.lower() != ".pdf")
     final_date = parse_any_date(ai.get("date")) or parse_text_date(analysis_text) or pdf_date or datetime.fromtimestamp(path.stat().st_mtime).date()
     classification = slugify(ai.get("classification") or heuristics["classification"])
     inferred = combined_tags(heuristics, ai, analysis_text)
     slug = slugify("-".join(inferred[:3]) or heuristics["slug"] or classification)
-    destination = unique_path(ARCHIVE_DIR / str(final_date.year) / f"{final_date.isoformat()}_{slug}.pdf"); destination.parent.mkdir(parents=True, exist_ok=True)
+    destination = unique_path(ARCHIVE_DIR / str(final_date.year) / f"{final_date.isoformat()}_{slug}{path.suffix.lower()}"); destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(path), destination)
-    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "summary": (heuristics["summary"] if heuristics["classification"] == "invoice" else ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(inferred), "removed_tags": "", "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
+    category = slugify(ai.get("category")) if slugify(ai.get("category")) in read_settings()["categories"] else "misc"
+    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "category": category, "summary": (heuristics["summary"] if heuristics["classification"] == "invoice" else ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(inferred), "removed_tags": "", "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
     write_rows(rows); log.info("Archived %s", destination)
 
 def scan_incoming():
@@ -596,7 +651,7 @@ def scan_incoming():
     try:
         managed_dirs = (ARCHIVE_DIR, ERROR_DIR, DUPLICATE_DIR, TRASH_DIR)
         source_paths = INCOMING_DIR.rglob("*") if RECURSIVE_SCAN else INCOMING_DIR.iterdir()
-        candidates = sorted((p for p in source_paths if p.is_file() and p.suffix.lower() == ".pdf" and not any(is_within(directory, p) for directory in managed_dirs)), key=lambda p: p.stat().st_mtime)
+        candidates = sorted((p for p in source_paths if p.is_file() and p.suffix.lower() in SUPPORTED_FORMATS and not any(is_within(directory, p) for directory in managed_dirs)), key=lambda p: p.stat().st_mtime)
         for path in candidates:
             if PIPELINE_STATE["paused"]:
                 break
@@ -700,21 +755,24 @@ def demo_document_pdf():
 
 @app.route("/api/index")
 def api_index():
-    query = request.args.get("q", "").strip(); years = set(filter(None, request.args.get("years", "").split(","))); duplicates = request.args.get("duplicates") == "1"; demo = request.args.get("demo") == "true"; rows = demo_document_rows() if demo else read_rows()
+    query = request.args.get("q", "").strip(); years = set(filter(None, request.args.get("years", "").split(","))); categories = set(filter(None, request.args.get("categories", "").split(","))); duplicates = request.args.get("duplicates") == "1"; demo = request.args.get("demo") == "true"; rows = demo_document_rows() if demo else read_rows()
     # Requested tokens may reference a tag that was since renamed/merged; resolve them to their current canonical value.
     aliases = tag_aliases()
     tokens = {canonical_tag(token, aliases) for token in filter(None, request.args.get("tokens", "").split(","))}
     selected_id = request.args.get("document", "").strip()
     duplicate_hashes = {value for value, count in Counter(row.get("file_hash") for row in rows if row.get("file_hash")).items() if count > 1}
-    searched = search_rows(rows, query); files = [row for row in searched if (not years or row.get("year") in years) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
-    year_rows = [row for row in searched if (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
-    tag_rows = [row for row in searched if (not years or row.get("year") in years) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
+    searched = search_rows(rows, query); files = [row for row in searched if (not years or row.get("year") in years) and (not categories or row.get("category") in categories) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
+    year_rows = [row for row in searched if (not categories or row.get("category") in categories) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
+    category_rows = [row for row in searched if (not years or row.get("year") in years) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
+    tag_rows = [row for row in searched if (not years or row.get("year") in years) and (not categories or row.get("category") in categories) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
     counts = Counter(tag for row in tag_rows for tag in row_tags(row))
     files.sort(key=lambda row: (row.get("date", ""), row.get("stored_path", "")), reverse=True)
     selected_row = next((row for row in rows if row.get("id") == selected_id), None)
     duplicate_counts = duplicate_counts_by_original(rows)
     serializer = serialize_demo_row if demo else serialize_row
-    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [serializer(row, duplicate_counts) for row in files], "selected_file": serializer(selected_row, duplicate_counts) if selected_row else None})
+    category_counts = Counter(row.get("category") for row in category_rows if row.get("category"))
+    category_values = list(dict.fromkeys(read_settings()["categories"] + sorted(category_counts)))
+    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "categories": [{"value": value, "count": category_counts[value], "selected": value in categories} for value in category_values], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [serializer(row, duplicate_counts) for row in files], "selected_file": serializer(selected_row, duplicate_counts) if selected_row else None})
 
 @app.route("/api/file/<row_id>/duplicates")
 def file_duplicates(row_id):
@@ -740,7 +798,7 @@ def update_file(row_id):
         current_path = file_path_for_row(row)
         filename = Path(str(payload.get("filename", current_path.name))).name.strip()
         if not filename or filename in {".", ".."}: abort(400, "Filename cannot be empty.")
-        if not filename.lower().endswith(".pdf"): filename += ".pdf"
+        if not Path(filename).suffix: filename += current_path.suffix
         if row.get("location") == "duplicates":
             destination = DUPLICATE_DIR / filename
         else:
@@ -864,9 +922,10 @@ def api_status():
         ocr_languages = []
     waiting = []
     if INCOMING_DIR.exists():
-        source_paths = INCOMING_DIR.rglob("*.pdf") if RECURSIVE_SCAN else INCOMING_DIR.glob("*.pdf")
+        source_paths = INCOMING_DIR.rglob("*") if RECURSIVE_SCAN else INCOMING_DIR.iterdir()
         for path in sorted(source_paths, key=lambda item: item.stat().st_mtime):
-            waiting.append({"name": path.name, "size": path.stat().st_size, "state": "processing" if path.name == PIPELINE_STATE["processing"] else "waiting"})
+            if path.is_file() and path.suffix.lower() in SUPPORTED_FORMATS:
+                waiting.append({"name": path.name, "size": path.stat().st_size, "state": "processing" if path.name == PIPELINE_STATE["processing"] else "waiting"})
     payload = {
         "ollama_enabled": AI_MODE == "ollama",
         "ollama_connected": connected,
@@ -919,6 +978,8 @@ def settings():
     if request.method == "POST":
         payload = request.get_json(silent=True) or {}
         current = read_settings(); current["ignored_tags"] = sorted(set(tag_values(payload.get("ignored_tags", current["ignored_tags"]))))
+        if "categories" in payload:
+            current["categories"] = list(dict.fromkeys(tag_values(payload["categories"]))) or list(DEFAULT_CATEGORIES)
         general_payload = payload.get("general")
         if isinstance(general_payload, dict):
             locked = general_locked_fields()
@@ -973,7 +1034,7 @@ def serve_file():
     full_path = file_path_for_row(row); base = DUPLICATE_DIR if row.get("location") == "duplicates" else ARCHIVE_DIR
     if not is_within(base, full_path): abort(403)
     if not full_path.is_file(): abort(404)
-    return send_file(full_path, mimetype="application/pdf")
+    return send_file(full_path, mimetype=mimetypes.guess_type(full_path.name)[0])
 
 if __name__ == "__main__":
     apply_general_settings(read_settings()["general"]); ensure_dirs(); start_worker(); log.info("DOGGS running at http://%s:%s", HOST, PORT); app.run(host=HOST, port=PORT, threaded=True)

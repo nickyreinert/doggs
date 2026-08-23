@@ -6,12 +6,12 @@ It has no cloud account, no database server, and no mandatory AI dependency.
 
 ## What it does
 
-- Watches an inbox for new PDF files every five minutes, and scans once immediately at startup.
+- Watches an inbox for supported documents every five minutes, and scans once immediately at startup.
 - Reads embedded PDF metadata (title, author, subject, keywords, creator, producer, and dates) and extracts visible text from the top of the first two pages.
 - Uses Tesseract OCR for scanned PDFs with little embedded text.
-- Optionally asks a local Ollama model for date, classification, filename slug, and summary.
+- Optionally asks a local Ollama model for date, classification, main category, filename slug, and summary.
 - Falls back to deterministic rules when Ollama is unavailable.
-- Stores PDFs under `archive/YYYY/YYYY-MM-DD_slug.pdf` and detects duplicates by SHA-256.
+- Stores documents under `archive/YYYY/YYYY-MM-DD_slug.<original-extension>` and detects duplicates by SHA-256.
 - Keeps searchable metadata in `data/index.csv`.
 - Provides search, PDF preview, live Ollama/OCR status, and an expandable processing pipeline.
 - Filters documents by year, tags, duplicate state, and free-text search.
@@ -153,6 +153,14 @@ By default, DOGGS scans only PDFs placed directly in `INCOMING_DIR`; subfolders 
 ## Local AI with Ollama
 
 DOGGS defaults to `qwen2.5:3b`, a small model for local metadata extraction. Ollama is optional: documents still archive using deterministic heuristics when it is unavailable.
+
+## Supported file formats
+
+DOGGS archives PDFs, plain text files, CSV files, and modern Microsoft Office files: `.docx`, `.xlsx`, and `.pptx`. Their original file format is retained in the archive. For non-PDF documents, DOGGS reads the final 80 non-empty lines (configurable through `LLM_SOURCE_LINES`) and sends that text to the local LLM; it does not run OCR.
+
+Older binary Office formats such as `.doc`, `.xls`, and `.ppt`, plus all other unsupported file types, remain untouched in the incoming folder.
+
+The **Categories** Settings tab manages the allowed high-level categories. The LLM assigns one of these to each document; the default categories include financial documents, invoices, incoming and outgoing documents, banking, tax office, insurance, contracts, personal documents, and miscellaneous.
 
 When local AI is enabled during installation, `install.sh` installs Ollama automatically when it is missing and pulls the selected model (default: `qwen2.5:3b`).
 

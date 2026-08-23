@@ -25,6 +25,10 @@
       <label for="years"><u>Y</u>ears <span class="shortcut-hint">Ctrl+Y</span></label>
       <select id="years" multiple size="5"></select>
     </section>
+    <section class="category-panel">
+      <label for="categories">Categories <span class="shortcut-hint">Ctrl+<u>W</u></span></label>
+      <select id="categories" multiple size="5"></select>
+    </section>
     <section class="search-panel">
       <label class="quick-label" for="query"><u>Q</u>uick search <span class="shortcut-hint">Ctrl+Q</span></label>
       <input id="query" type="search" placeholder="Filename, date, classification…">
@@ -136,6 +140,7 @@
   <nav class="settings-tabs" aria-label="Settings sections">
     <button type="button" class="settings-tab" data-tab="general">General</button>
     <button type="button" class="settings-tab active" data-tab="tags">Tags</button>
+    <button type="button" class="settings-tab" data-tab="categories">Categories</button>
     <button type="button" class="settings-tab" data-tab="prompts">LLM prompts</button>
     <button type="button" class="settings-tab" data-tab="schedule">Background schedule</button>
     <button type="button" class="settings-tab" data-tab="layout">Layout</button>
@@ -173,6 +178,11 @@
     <label class="editor" for="tagAliasSearch">Canonical tags (renamed / merged)</label>
     <input id="tagAliasSearch" type="search" placeholder="Filter renamed tags…">
     <div class="tag-alias-list" id="tagAliasList"></div>
+  </section>
+  <section class="settings-pane" data-pane="categories" hidden>
+    <p>One category per line. The LLM must assign every processed document to one of these categories.</p>
+    <label class="editor" for="categoriesInput">Document categories</label>
+    <textarea id="categoriesInput" placeholder="financial-document&#10;invoice&#10;incoming&#10;outgoing&#10;banking&#10;tax-office&#10;insurance&#10;contract&#10;personal&#10;misc"></textarea>
   </section>
   <section class="settings-pane" data-pane="prompts" hidden>
     <p>Document text is appended automatically. Keep the metadata response JSON-compatible.</p>

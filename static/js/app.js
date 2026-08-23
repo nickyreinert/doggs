@@ -1,4 +1,4 @@
-const state = { q: '', years: new Set(), tags: new Set(), duplicates: false, demo: false, selected: null, requestedDocument: '' };
+const state = { q: '', years: new Set(), categories: new Set(), tags: new Set(), duplicates: false, demo: false, selected: null, requestedDocument: '' };
 let files = [], timer, availableYears = [], visibleTags = [], tagAliases = {};
 const $ = id => document.getElementById(id);
 const THEME_KEY = 'doggs-theme';
@@ -13,6 +13,7 @@ function syncUrl(push = false) {
   const p = new URLSearchParams();
   if (state.q) p.set('q', state.q);
   if (state.years.size) p.set('years', [...state.years].join(','));
+  if (state.categories.size) p.set('categories', [...state.categories].join(','));
   if (state.tags.size) p.set('tags', [...state.tags].join(','));
   if (state.duplicates) p.set('duplicates', '1');
   if (state.demo) p.set('demo', 'true');
@@ -26,6 +27,7 @@ function restoreUrlState() {
   const p = new URLSearchParams(location.search);
   state.q = p.get('q') || '';
   state.years = new Set((p.get('years') || '').split(',').filter(Boolean));
+  state.categories = new Set((p.get('categories') || '').split(',').filter(Boolean));
   state.tags = new Set((p.get('tags') || '').split(',').filter(Boolean));
   state.duplicates = p.get('duplicates') === '1';
   state.demo = p.get('demo') === 'true';
@@ -43,6 +45,7 @@ async function refresh() {
   const p = new URLSearchParams();
   if (state.q) p.set('q', state.q);
   if (state.years.size) p.set('years', [...state.years].join(','));
+  if (state.categories.size) p.set('categories', [...state.categories].join(','));
   if (state.tags.size) p.set('tokens', [...state.tags].join(','));
   if (state.duplicates) p.set('duplicates', '1');
   if (state.demo) p.set('demo', 'true');
@@ -54,6 +57,8 @@ async function refresh() {
   availableYears = (d.years || []).map(i => i.value);
   $('years').innerHTML = '<option value="">All years</option>' + (d.years || []).map(i => '<option value="' + i.value + '">' + i.value + ' (' + i.count + ')</option>').join('');
   [...$('years').options].forEach(o => o.selected = state.years.size ? state.years.has(o.value) : o.value === '');
+  $('categories').innerHTML = '<option value="">All categories</option>' + (d.categories || []).map(i => '<option value="' + i.value + '">' + i.value + ' (' + i.count + ')</option>').join('');
+  [...$('categories').options].forEach(o => o.selected = state.categories.size ? state.categories.has(o.value) : o.value === '');
   renderTags(d.tags || []);
   $('duplicateCount').textContent = d.duplicates_count || 0;
   renderFiles(d.files || []);
@@ -203,8 +208,11 @@ function selectFile(f, load = true, updateUrl = true) {
   state.requestedDocument = '';
   $('detailsEditor').hidden = false;
   $('editorActions').hidden = false;
+  const isPdf = f.name.toLowerCase().endsWith('.pdf');
+  $('runOcr').hidden = !isPdf;
+  $('allPages').closest('label').hidden = !isPdf;
   $('documentTitle').textContent = f.pdf_title || f.name;
-  $('documentMeta').textContent = [f.name, f.pdf_author, f.date, f.classification, f.is_duplicate ? 'Duplicate content' : ''].filter(Boolean).join(' • ');
+  $('documentMeta').textContent = [f.name, f.pdf_author, f.date, f.category, f.classification, f.is_duplicate ? 'Duplicate content' : ''].filter(Boolean).join(' • ');
   $('tagInput').value = '';
   $('filenameInput').value = f.name;
   $('summaryInput').value = f.summary || '';
@@ -451,6 +459,7 @@ function populateGeneralSettings(general, locked) {
 async function openSettings(updateUrl = true) {
   const s = await (await fetch('/api/settings')).json();
   $('ignoredTags').value = s.ignored_tags.join(', ');
+  $('categoriesInput').value = (s.categories || []).join('\n');
   tagAliases = s.tag_aliases || {};
   $('tagAliasSearch').value = '';
   renderTagAliases();
@@ -471,6 +480,7 @@ async function saveSettings(event) {
   event.preventDefault();
   const payload = {
     ignored_tags: $('ignoredTags').value.split(/[\s,]+/).filter(Boolean),
+    categories: $('categoriesInput').value.split(/[\n,]+/).map(value => value.trim()).filter(Boolean),
     prompts: { metadata: $('metadataPrompt').value, summary: $('summaryPrompt').value },
     schedule: { mode: $('scheduleMode').value, interval_minutes: $('intervalMinutes').value, daily_times: $('dailyTimes').value.split(/[\s,]+/).filter(Boolean) },
     general: { ...Object.fromEntries(Object.entries(GENERAL_FIELDS).map(([id, key]) => [key, $(id).value.trim()])), recursive_scan: $('generalRecursive').checked }
@@ -539,6 +549,13 @@ $('years').onchange = e => {
   syncUrl(true);
   refresh();
 };
+$('categories').onchange = e => {
+  const all = [...e.target.options].find(option => option.value === '');
+  state.categories = all?.selected ? new Set() : new Set([...e.target.selectedOptions].map(option => option.value).filter(Boolean));
+  if (all) all.selected = !state.categories.size;
+  syncUrl(true);
+  refresh();
+};
 $('query').oninput = e => { state.q = e.target.value.trim(); syncUrl(); clearTimeout(timer); timer = setTimeout(refresh, 250) };
 $('tagSearch').oninput = () => renderTags(visibleTags);
 $('tagAliasSearch').oninput = renderTagAliases;
@@ -546,8 +563,8 @@ $('tagInput').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); ad
 $('documentTitle').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur() } };
 $('duplicates').onchange = e => { state.duplicates = e.target.checked; $('cleanDuplicatesButton').hidden = !state.duplicates; syncUrl(true); refresh() };
 $('resetFilters').onclick = () => {
-  state.q = ''; state.years = new Set(); state.tags = new Set(); state.duplicates = false;
-  $('query').value = ''; $('duplicates').checked = false; $('tagSearch').value = ''; $('cleanDuplicatesButton').hidden = true;
+  state.q = ''; state.years = new Set(); state.categories = new Set(); state.tags = new Set(); state.duplicates = false;
+  $('query').value = ''; $('categories').selectedIndex = 0; $('duplicates').checked = false; $('tagSearch').value = ''; $('cleanDuplicatesButton').hidden = true;
   syncUrl(true);
   refresh();
 };
@@ -612,6 +629,9 @@ document.addEventListener('keydown', event => {
     } else if (key === 'y') {
       event.preventDefault();
       $('years').focus();
+    } else if (key === 'w') {
+      event.preventDefault();
+      $('categories').focus();
     } else if (key === 's' && event.shiftKey) {
       event.preventDefault();
       if (!$('stopScan').hidden) $('stopScan').click();
