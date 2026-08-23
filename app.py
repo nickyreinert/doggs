@@ -70,7 +70,7 @@ FULL_SCAN_STATE = {}
 OCR_SCAN_STATE = {}
 NORMAL_SCAN_STATE = {}
 LLM_RERUN_STATE = {"state": "idle", "current": 0, "total": 0, "error": ""}
-RESCAN_STATE = {"state": "idle", "current": 0, "total": 0, "error": ""}
+RESCAN_STATE = {"state": "idle", "current": 0, "total": 0, "processing": "", "error": ""}
 SCHEDULE_STATE = {"last_interval": 0.0, "daily_runs": set()}
 LEGACY_METADATA_PROMPT = "Return JSON: date (YYYY-MM-DD|null), classification (one lowercase word such as invoice), tags (array of 2-5 short lowercase hyphenated tags), slug (2-5 lowercase hyphenated words based on the useful tags), summary (one accurate <=160-character sentence). For a German invoice, tags should resemble rechnung, firma-sattig, darmstadt, rechnungsdatum — never fpdf, pdflib, printer, php, or linux."
 DEFAULT_METADATA_PROMPT = """Extract metadata only from the supplied document text. Return one JSON object and nothing else:
@@ -480,13 +480,17 @@ def run_llm_rerun(row_ids):
         log.exception("LLM rerun failed"); LLM_RERUN_STATE.update(state="error", error=str(exc))
 
 def run_bulk_rescan(row_ids):
-    RESCAN_STATE.update(state="running", current=0, total=len(row_ids), error="")
+    RESCAN_STATE.update(state="running", current=0, total=len(row_ids), processing="", error="")
     try:
         for row_id in row_ids:
+            while PIPELINE_STATE["paused"]:
+                RESCAN_STATE["processing"] = ""
+                time.sleep(.2)
             rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
             if not row:
                 RESCAN_STATE["current"] += 1; continue
             path = file_path_for_row(row)
+            RESCAN_STATE["processing"] = path.name
             try:
                 with fitz.open(path) as doc:
                     pdf_metadata = extract_pdf_metadata(doc)
@@ -504,9 +508,9 @@ def run_bulk_rescan(row_ids):
                 RESCAN_STATE["error"] = f"{path.name}: {exc}"
             finally:
                 RESCAN_STATE["current"] += 1
-        RESCAN_STATE["state"] = "complete"
+        RESCAN_STATE.update(state="complete", processing="")
     except Exception as exc:
-        log.exception("Bulk rescan failed"); RESCAN_STATE.update(state="error", error=str(exc))
+        log.exception("Bulk rescan failed"); RESCAN_STATE.update(state="error", processing="", error=str(exc))
 
 def process_file(path):
     file_hash, rows = sha256_file(path), read_rows()
@@ -838,7 +842,7 @@ def api_scan():
 def api_rescan():
     if RESCAN_STATE["state"] in {"queued", "running"}: return jsonify({"started": False, "message": "A re-scan is already in progress."}), 409
     row_ids = [row["id"] for row in read_rows()]
-    RESCAN_STATE.update(state="queued", current=0, total=len(row_ids), error="")
+    RESCAN_STATE.update(state="queued", current=0, total=len(row_ids), processing="", error="")
     STATUS_CACHE["payload"] = None
     threading.Thread(target=run_bulk_rescan, args=(row_ids,), daemon=True).start()
     return jsonify({"started": True})

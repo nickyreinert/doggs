@@ -400,13 +400,17 @@ async function refreshStatus() {
     $('ollamaDot').className = 'dot ' + (s.ollama_connected ? 'ok' : 'warn');
     $('ollamaStatus').textContent = s.ollama_connected ? 'Ollama connected' : s.error || 'Ollama unavailable';
     $('modelStatus').textContent = 'Model: ' + s.model;
-    const rescan = d.rescan || {};
-    const rescanProgress = rescan.state === 'running' ? ' · re-scanning ' + rescan.current + '/' + rescan.total : '';
-    $('pipelineCount').textContent = 'Pipeline · ' + p.waiting_count + ' waiting' + (p.paused ? (p.processing ? ' · finishing current file' : ' · paused') : '') + (!p.paused && p.processing ? ' · processing ' + p.processing : '') + rescanProgress;
+    const rescan = s.rescan || {};
+    const rescanActive = ['queued', 'running'].includes(rescan.state);
+    const rescanProgress = rescanActive ? ' · re-scanning ' + rescan.current + '/' + rescan.total : '';
+    const pauseState = p.paused ? (p.processing || rescan.processing ? ' · finishing current file' : ' · paused') : '';
+    $('pipelineCount').textContent = 'Pipeline · ' + p.waiting_count + ' waiting' + pauseState + (!p.paused && p.processing ? ' · processing ' + p.processing : '') + rescanProgress;
     $('pausePipeline').textContent = p.paused ? 'Resume pipeline' : 'Pause pipeline';
     $('ocrStatus').textContent = 'OCR ' + s.ocr_language + ': ' + (s.ocr_available ? 'available' : 'missing');
-    $('pipelineList').innerHTML = p.waiting.length ? p.waiting.map(x => '<li>' + x.name + ' · ' + Math.ceil(x.size / 1024) + ' KB · ' + x.state + '</li>').join('') : '<li>No PDFs waiting in the inbox.</li>';
-    $('pipelineError').textContent = p.last_error || '';
+    const entries = p.waiting.map(x => '<li>' + x.name + ' · ' + Math.ceil(x.size / 1024) + ' KB · ' + x.state + '</li>');
+    if (rescanActive) entries.unshift('<li>' + (p.paused && !rescan.processing ? 'Re-scan paused' : 'Re-scanning ' + (rescan.processing || 'documents')) + ' · ' + rescan.current + '/' + rescan.total + ' · quick OCR and classification</li>');
+    $('pipelineList').innerHTML = entries.length ? entries.join('') : '<li>No PDFs waiting in the inbox.</li>';
+    $('pipelineError').textContent = rescan.error || p.last_error || '';
   } catch {
     $('ollamaStatus').textContent = 'Status unavailable';
   }
@@ -561,6 +565,7 @@ $('scanNow').onclick = async () => {
   const r = await fetch('/api/rescan', { method: 'POST' });
   button.disabled = false;
   if (!r.ok) { alert('Could not start the re-scan.'); return }
+  if (!$('pipeline').classList.contains('open')) togglePipeline();
   refreshStatus();
 };
 $('pausePipeline').onclick = async () => { await fetch('/api/pipeline/pause', { method: 'POST' }); refreshStatus() };
