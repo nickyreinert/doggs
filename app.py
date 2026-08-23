@@ -638,6 +638,20 @@ def delete_file(row_id):
     STATUS_CACHE["payload"] = None
     return jsonify({"ok": True})
 
+@app.post("/api/duplicates/clean")
+def clean_duplicates():
+    """Remove every flagged duplicate copy, keeping only the original document in each group."""
+    rows = read_rows()
+    duplicate_rows = [row for row in rows if row.get("is_duplicate") == "1"]
+    for row in duplicate_rows:
+        path = file_path_for_row(row)
+        if path.is_file():
+            try: move_to_side_dir(path, TRASH_DIR)
+            except OSError: log.exception("Could not move %s to trash", path)
+    write_rows([row for row in rows if row.get("is_duplicate") != "1"])
+    STATUS_CACHE["payload"] = None
+    return jsonify({"ok": True, "removed": len(duplicate_rows)})
+
 @app.route("/api/file/<row_id>/details", methods=["GET", "POST"])
 def file_details(row_id):
     rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)

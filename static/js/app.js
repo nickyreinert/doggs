@@ -31,6 +31,7 @@ function restoreUrlState() {
   state.requestedDocument = p.get('document') || '';
   $('query').value = state.q;
   $('duplicates').checked = state.duplicates;
+  $('cleanDuplicatesButton').hidden = !state.duplicates;
   const settings = p.get('settings') === '1';
   if (settings && !$('settingsDialog').open) openSettings(false);
   if (!settings && $('settingsDialog').open) $('settingsDialog').close();
@@ -516,12 +517,18 @@ $('query').oninput = e => { state.q = e.target.value.trim(); syncUrl(); clearTim
 $('tagSearch').oninput = () => renderTags(visibleTags);
 $('tagAliasSearch').oninput = renderTagAliases;
 $('tagInput').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); addDocumentTag() } };
-$('duplicates').onchange = e => { state.duplicates = e.target.checked; syncUrl(true); refresh() };
+$('duplicates').onchange = e => { state.duplicates = e.target.checked; $('cleanDuplicatesButton').hidden = !state.duplicates; syncUrl(true); refresh() };
 $('resetFilters').onclick = () => {
   state.q = ''; state.years = new Set(); state.tags = new Set(); state.duplicates = false;
-  $('query').value = ''; $('duplicates').checked = false; $('tagSearch').value = '';
+  $('query').value = ''; $('duplicates').checked = false; $('tagSearch').value = ''; $('cleanDuplicatesButton').hidden = true;
   syncUrl(true);
   refresh();
+};
+$('cleanDuplicatesButton').onclick = async () => {
+  if (!confirm('Remove every duplicate copy and keep only one original of each document? This cannot be undone.')) return;
+  const r = await fetch('/api/duplicates/clean', { method: 'POST' });
+  if (!r.ok) { alert('Could not clean duplicates.'); return }
+  await refresh();
 };
 $('saveDetails').onclick = saveDetails;
 $('yearInput').onchange = moveDocumentYear;
