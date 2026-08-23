@@ -11,6 +11,7 @@ import threading
 import time
 from collections import Counter
 from datetime import UTC, date, datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -596,12 +597,53 @@ def serialize_row(row, duplicate_counts=None):
     duplicate_count = (duplicate_counts or {}).get(original_id, 0)
     return {**row, "name": Path(row.get("stored_path", "")).name, "document_tags": document_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "duplicate_count": duplicate_count, "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "ocr_scan": OCR_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})}
 
+def demo_document_rows():
+    """Return screenshot-friendly sample records without writing to the real archive."""
+    documents = [
+        ("travel", "2026-03-08", "Travel Expense Summary - Q1", "2026-03-08_travel-expenses-q1.pdf", "receipt", "Fictional travel expenses for a March client visit.", "expenses travel hamburg", 2),
+        ("invoice", "2025-11-18", "Office Supply Invoice - November", "2025-11-18_northstar-office-supplies.pdf", "invoice", "Fictional office supply invoice from Northstar Office.", "invoice northstar berlin", 3),
+        ("utility", "2025-06-02", "Electricity Contract Renewal", "2025-06-02_electricity-contract-renewal.pdf", "utility", "Fictional confirmation of an annual electricity contract renewal.", "utility electricity renewal", 0),
+        ("insurance", "2024-09-12", "Health Insurance Notice", "2024-09-12_health-insurance-notice.pdf", "insurance", "Fictional insurance notice covering the new contribution period.", "insurance health contribution", 4),
+        ("bank", "2024-04-30", "Bank Statement - April", "2024-04-30_bank-statement-april.pdf", "bank", "Fictional monthly bank statement for the April account period.", "bank statement april", 0),
+        ("tax", "2023-02-15", "Annual Tax Assessment", "2023-02-15_tax-assessment-2022.pdf", "tax", "Fictional annual tax assessment for the previous year.", "tax assessment annual", 2),
+    ]
+    rows = []
+    for key, document_date, title, filename, classification, summary, tokens, copies in documents:
+        year = document_date[:4]
+        original = {"id": f"demo-{key}", "file_hash": f"demo-hash-{key}", "original_name": filename, "stored_path": f"{year}/{filename}", "location": "archive", "date": document_date, "year": year, "slug": slugify(title), "classification": classification, "summary": summary, "tokens": tokens, "removed_tags": "", "tags": "sample", "ocr_text": "This is a fictional document for a DOGGS screenshot.", "is_duplicate": "", "duplicate_of": "", "pdf_title": title, "pdf_author": "DOGGS Demo Office", "pdf_subject": "Sample document", "pdf_keywords": tokens, "pdf_creator": "DOGGS", "pdf_producer": "DOGGS", "source": "demo", "created_at": f"{document_date}T09:30:00+00:00"}
+        rows.append(original)
+        for copy_number in range(2, copies + 1):
+            copy_filename = filename.removesuffix(".pdf") + f"-copy-{copy_number}.pdf"
+            rows.append({**original, "id": f"demo-{key}-copy-{copy_number}", "original_name": copy_filename, "stored_path": copy_filename, "location": "duplicates", "is_duplicate": "1", "duplicate_of": original["id"], "created_at": f"{document_date}T09:{30 + copy_number}:00+00:00"})
+    return rows
+
+def serialize_demo_row(row, duplicate_counts):
+    data = serialize_row(row, duplicate_counts)
+    data["url"] = "/demo-document.pdf"
+    return data
+
 @app.route("/")
 def index(): return render_template("index.html")
 
+@app.route("/demo-document.pdf")
+def demo_document_pdf():
+    document = fitz.open()
+    try:
+        page = document.new_page(width=595, height=842)
+        page.draw_rect(fitz.Rect(0, 0, 595, 92), color=(0.10, 0.28, 0.44), fill=(0.10, 0.28, 0.44))
+        page.insert_text((46, 47), "NORTHSTAR OFFICE", fontsize=20, fontname="hebo", color=(1, 1, 1))
+        page.insert_text((46, 70), "Fictional business document", fontsize=10, color=(0.86, 0.92, 0.97))
+        page.insert_text((46, 144), "Document summary", fontsize=21, fontname="hebo", color=(0.12, 0.18, 0.24))
+        page.insert_text((46, 178), "Date: 18 November 2025", fontsize=11, color=(0.28, 0.35, 0.42))
+        page.draw_line((46, 198), (549, 198), color=(0.78, 0.83, 0.88), width=0.8)
+        page.insert_textbox(fitz.Rect(46, 224, 520, 350), "This is a fictional PDF used only for the DOGGS demo view. It provides a consistent preview for every sample document and duplicate record.", fontsize=12, lineheight=1.5, color=(0.12, 0.18, 0.24))
+        return send_file(BytesIO(document.tobytes(garbage=4, deflate=True)), mimetype="application/pdf", download_name="doggs-demo-document.pdf")
+    finally:
+        document.close()
+
 @app.route("/api/index")
 def api_index():
-    query = request.args.get("q", "").strip(); years = set(filter(None, request.args.get("years", "").split(","))); duplicates = request.args.get("duplicates") == "1"; rows = read_rows()
+    query = request.args.get("q", "").strip(); years = set(filter(None, request.args.get("years", "").split(","))); duplicates = request.args.get("duplicates") == "1"; demo = request.args.get("demo") == "true"; rows = demo_document_rows() if demo else read_rows()
     # Requested tokens may reference a tag that was since renamed/merged; resolve them to their current canonical value.
     aliases = tag_aliases()
     tokens = {canonical_tag(token, aliases) for token in filter(None, request.args.get("tokens", "").split(","))}
@@ -614,18 +656,20 @@ def api_index():
     files.sort(key=lambda row: (row.get("date", ""), row.get("stored_path", "")), reverse=True)
     selected_row = next((row for row in rows if row.get("id") == selected_id), None)
     duplicate_counts = duplicate_counts_by_original(rows)
-    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [serialize_row(row, duplicate_counts) for row in files], "selected_file": serialize_row(selected_row, duplicate_counts) if selected_row else None})
+    serializer = serialize_demo_row if demo else serialize_row
+    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [serializer(row, duplicate_counts) for row in files], "selected_file": serializer(selected_row, duplicate_counts) if selected_row else None})
 
 @app.route("/api/file/<row_id>/duplicates")
 def file_duplicates(row_id):
     """Return the original document plus every duplicate copy sharing its file hash."""
-    rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
+    demo = row_id.startswith("demo-"); rows = demo_document_rows() if demo else read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
     if not row: abort(404)
     original_id = row.get("duplicate_of") or row.get("id")
     group = [item for item in rows if item.get("id") == original_id or item.get("duplicate_of") == original_id]
     group.sort(key=lambda item: item.get("created_at", ""))
     duplicate_counts = duplicate_counts_by_original(rows)
-    return jsonify({"documents": [serialize_row(item, duplicate_counts) for item in group]})
+    serializer = serialize_demo_row if demo else serialize_row
+    return jsonify({"documents": [serializer(item, duplicate_counts) for item in group]})
 
 @app.post("/api/file/<row_id>")
 def update_file(row_id):

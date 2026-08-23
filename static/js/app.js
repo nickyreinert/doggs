@@ -1,4 +1,4 @@
-const state = { q: '', years: new Set(), tags: new Set(), duplicates: false, selected: null, requestedDocument: '' };
+const state = { q: '', years: new Set(), tags: new Set(), duplicates: false, demo: false, selected: null, requestedDocument: '' };
 let files = [], timer, availableYears = [], visibleTags = [], tagAliases = {};
 const $ = id => document.getElementById(id);
 const THEME_KEY = 'doggs-theme';
@@ -15,6 +15,7 @@ function syncUrl(push = false) {
   if (state.years.size) p.set('years', [...state.years].join(','));
   if (state.tags.size) p.set('tags', [...state.tags].join(','));
   if (state.duplicates) p.set('duplicates', '1');
+  if (state.demo) p.set('demo', 'true');
   const documentId = state.selected?.id || state.requestedDocument;
   if (documentId) p.set('document', documentId);
   if ($('settingsDialog').open) p.set('settings', '1');
@@ -27,6 +28,7 @@ function restoreUrlState() {
   state.years = new Set((p.get('years') || '').split(',').filter(Boolean));
   state.tags = new Set((p.get('tags') || '').split(',').filter(Boolean));
   state.duplicates = p.get('duplicates') === '1';
+  state.demo = p.get('demo') === 'true';
   state.selected = null;
   state.requestedDocument = p.get('document') || '';
   $('query').value = state.q;
@@ -43,6 +45,7 @@ async function refresh() {
   if (state.years.size) p.set('years', [...state.years].join(','));
   if (state.tags.size) p.set('tokens', [...state.tags].join(','));
   if (state.duplicates) p.set('duplicates', '1');
+  if (state.demo) p.set('demo', 'true');
   const selectedId = state.selected?.id || state.requestedDocument;
   if (selectedId) p.set('document', selectedId);
   const r = await fetch('/api/index?' + p);
