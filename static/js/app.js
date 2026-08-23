@@ -1,5 +1,5 @@
 const state = { q: '', years: new Set(), categories: new Set(), tags: new Set(), duplicates: false, demo: false, selected: null, requestedDocument: '' };
-let files = [], timer, availableYears = [], visibleTags = [], tagAliases = {};
+let files = [], timer, availableYears = [], visibleTags = [], tagAliases = {}, activeSettingsTab = 'tags';
 const $ = id => document.getElementById(id);
 const THEME_KEY = 'doggs-theme';
 
@@ -19,7 +19,7 @@ function syncUrl(push = false) {
   if (state.demo) p.set('demo', 'true');
   const documentId = state.selected?.id || state.requestedDocument;
   if (documentId) p.set('document', documentId);
-  if ($('settingsDialog').open) p.set('settings', '1');
+  if ($('settingsDialog').open) { p.set('settings', '1'); p.set('settings-tab', activeSettingsTab); }
   history[push ? 'pushState' : 'replaceState']({}, '', location.pathname + (p.size ? '?' + p.toString() : ''));
 }
 
@@ -37,6 +37,7 @@ function restoreUrlState() {
   $('duplicates').checked = state.duplicates;
   $('cleanDuplicatesButton').hidden = !state.duplicates;
   const settings = p.get('settings') === '1';
+  activeSettingsTab = p.get('settings-tab') || 'tags';
   if (settings && !$('settingsDialog').open) openSettings(false);
   if (!settings && $('settingsDialog').open) $('settingsDialog').close();
 }
@@ -430,9 +431,11 @@ async function refreshStatus() {
   }
 }
 
-function showSettingsTab(name) {
+function showSettingsTab(name, updateUrl = true) {
+  activeSettingsTab = name;
   document.querySelectorAll('.settings-tab').forEach(button => button.classList.toggle('active', button.dataset.tab === name));
   document.querySelectorAll('.settings-pane').forEach(pane => pane.hidden = pane.dataset.pane !== name);
+  if (updateUrl && $('settingsDialog').open) syncUrl(true);
 }
 
 document.querySelectorAll('[data-theme-choice]').forEach(card => card.onclick = () => applyTheme(card.dataset.themeChoice));
@@ -474,7 +477,7 @@ async function openSettings(updateUrl = true) {
   $('dailyTimes').value = s.schedule.daily_times.join(', ');
   updateScheduleFields();
   applyTheme(document.documentElement.dataset.theme || 'classic');
-  showSettingsTab('tags');
+  showSettingsTab(activeSettingsTab, false);
   if (!$('settingsDialog').open) $('settingsDialog').showModal();
   if (updateUrl) syncUrl(true);
 }

@@ -448,12 +448,20 @@ def combined_tags(heuristic, extracted, text):
     extra = relevant_ai_tags(extracted.get("tags", []), text)
     return list(dict.fromkeys(base + extra))
 
+def resolved_category(extracted, classification, categories):
+    """Keep a valid LLM category, otherwise map reliable local classifications."""
+    candidate = slugify(extracted.get("category"))
+    if candidate in categories: return candidate
+    fallback_by_classification = {"invoice": "invoice", "receipt": "financial-document", "bank": "banking", "insurance": "insurance", "contract": "contract", "tax": "tax-office", "official": "tax-office", "salary": "financial-document", "utility": "outgoing", "medical": "personal"}
+    fallback = fallback_by_classification.get(classification, "misc")
+    return fallback if fallback in categories else "misc"
+
 def replace_extracted_result(row, heuristic, extracted, text):
     """Replace generated fields only; the user's manual `tags` field is immutable here."""
     tags = combined_tags(heuristic, extracted, text)
     row["classification"] = slugify(heuristic["classification"] if heuristic["classification"] != "document" else extracted.get("classification") or "document")
     categories = read_settings()["categories"]
-    row["category"] = slugify(extracted.get("category")) if slugify(extracted.get("category")) in categories else "misc"
+    row["category"] = resolved_category(extracted, row["classification"], categories)
     row["summary"] = (heuristic["summary"] if heuristic["classification"] == "invoice" else extracted.get("summary") or heuristic["summary"]).strip()[:240]
     row["tokens"] = " ".join(tags)
     row["removed_tags"] = ""
@@ -644,7 +652,7 @@ def process_file(path):
     slug = slugify("-".join(inferred[:3]) or heuristics["slug"] or classification)
     destination = unique_path(ARCHIVE_DIR / str(final_date.year) / f"{final_date.isoformat()}_{slug}{path.suffix.lower()}"); destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(path), destination)
-    category = slugify(ai.get("category")) if slugify(ai.get("category")) in read_settings()["categories"] else "misc"
+    category = resolved_category(ai, classification, read_settings()["categories"])
     rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "category": category, "summary": (heuristics["summary"] if heuristics["classification"] == "invoice" else ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(inferred), "removed_tags": "", "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
     write_rows(rows); log.info("Archived %s", destination)
 
