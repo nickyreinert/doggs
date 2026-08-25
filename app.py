@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""DOGGS: local PDF intake, metadata extraction, and searchable archive."""
+"""DOGGS: local document intake, metadata extraction, and searchable archive."""
 import csv
 import hashlib
+import html
 import json
 import logging
 import mimetypes
@@ -10,6 +11,7 @@ import re
 import shutil
 import threading
 import time
+import zipfile
 from collections import Counter
 from datetime import UTC, date, datetime
 from io import BytesIO
@@ -24,6 +26,9 @@ from dateutil import parser as dateparser
 from docx import Document
 from flask import Flask, abort, jsonify, render_template, request, send_file
 from openpyxl import load_workbook
+from odf import teletype
+from odf.opendocument import load as load_odf
+from odf.text import H, P
 from PIL import Image
 from pptx import Presentation
 from dotenv import load_dotenv
@@ -57,7 +62,10 @@ AI_MODE, OLLAMA_URL = os.getenv("AI_MODE", "ollama"), os.getenv("OLLAMA_URL", "h
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:3b")
 DATE_DAYFIRST = os.getenv("DATE_DAYFIRST", "1") == "1"
 MAX_TOKEN_FACETS = int(os.getenv("MAX_TOKEN_FACETS", "80"))
-TEXT_FORMATS = {".docx", ".txt", ".xlsx", ".csv", ".pptx"}
+TEXT_FORMATS = {
+    ".csv", ".epub", ".htm", ".html", ".ini", ".json", ".log", ".md", ".odp", ".ods", ".odt",
+    ".pptx", ".rtf", ".tex", ".tsv", ".txt", ".xml", ".yaml", ".yml", ".docx", ".xlsx",
+}
 SUPPORTED_FORMATS = {".pdf", *TEXT_FORMATS}
 LLM_SOURCE_LINES = int(os.getenv("LLM_SOURCE_LINES", "80"))
 DEFAULT_CATEGORIES = ["financial-document", "invoice", "incoming", "outgoing", "banking", "tax-office", "insurance", "contract", "personal", "misc"]
@@ -368,11 +376,26 @@ def extract_normal_text(path):
 def extract_text_document(path):
     """Extract readable text from supported non-PDF formats without altering their bytes."""
     suffix = path.suffix.lower()
-    if suffix == ".txt":
+    if suffix in {".txt", ".md", ".log", ".ini", ".yaml", ".yml", ".tex", ".rtf"}:
         text = path.read_text(encoding="utf-8", errors="replace")
-    elif suffix == ".csv":
+        if suffix == ".rtf":
+            text = re.sub(r"\\'[0-9a-fA-F]{2}|\\[a-z]+-?\d* ?|[{}]", "", text)
+    elif suffix in {".csv", ".tsv"}:
         with path.open(newline="", encoding="utf-8-sig", errors="replace") as file:
-            text = "\n".join(" | ".join(cell.strip() for cell in row) for row in csv.reader(file))
+            dialect = csv.excel_tab if suffix == ".tsv" else csv.excel
+            text = "\n".join(" | ".join(cell.strip() for cell in row) for row in csv.reader(file, dialect=dialect))
+    elif suffix == ".json":
+        try:
+            text = json.dumps(json.loads(path.read_text(encoding="utf-8")), ensure_ascii=False, indent=2)
+        except json.JSONDecodeError:
+            text = path.read_text(encoding="utf-8", errors="replace")
+    elif suffix in {".html", ".htm", ".xml"}:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        text = re.sub(r"<[^>]+>", " ", raw) if suffix in {".html", ".htm"} else raw
+        text = html.unescape(text)
+    elif suffix in {".odt", ".ods", ".odp"}:
+        document = load_odf(path)
+        text = "\n".join(teletype.extractText(element) for element in (*document.getElementsByType(H), *document.getElementsByType(P)))
     elif suffix == ".docx":
         document = Document(path)
         text = "\n".join(paragraph.text for paragraph in document.paragraphs)
@@ -392,6 +415,13 @@ def extract_text_document(path):
             "\n".join(shape.text for shape in slide.shapes if hasattr(shape, "text") and shape.text.strip())
             for slide in presentation.slides
         )
+    elif suffix == ".epub":
+        with zipfile.ZipFile(path) as archive:
+            text = "\n".join(
+                html.unescape(re.sub(r"<[^>]+>", " ", archive.read(name).decode("utf-8", errors="replace")))
+                for name in archive.namelist()
+                if name.lower().endswith((".html", ".htm", ".xhtml"))
+            )
     else:
         raise ValueError(f"Unsupported document format: {suffix}")
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -732,7 +762,8 @@ def duplicate_counts_by_original(rows):
 def serialize_row(row, duplicate_counts=None):
     original_id = row.get("duplicate_of") or row.get("id")
     duplicate_count = (duplicate_counts or {}).get(original_id, 0)
-    return {**row, "name": Path(row.get("stored_path", "")).name, "document_tags": document_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "duplicate_count": duplicate_count, "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "ocr_scan": OCR_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})}
+    document_type = Path(row.get("stored_path", row.get("original_name", ""))).suffix.lower().removeprefix(".") or "unknown"
+    return {**row, "name": Path(row.get("stored_path", "")).name, "type": document_type, "document_tags": document_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "duplicate_count": duplicate_count, "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "ocr_scan": OCR_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})}
 
 def demo_document_rows():
     """Return screenshot-friendly sample records without writing to the real archive."""
@@ -780,16 +811,18 @@ def demo_document_pdf():
 
 @app.route("/api/index")
 def api_index():
-    query = request.args.get("q", "").strip(); years = set(filter(None, request.args.get("years", "").split(","))); categories = set(filter(None, request.args.get("categories", "").split(","))); duplicates = request.args.get("duplicates") == "1"; demo = request.args.get("demo") == "true"; rows = demo_document_rows() if demo else read_rows()
+    query = request.args.get("q", "").strip(); years = set(filter(None, request.args.get("years", "").split(","))); categories = set(filter(None, request.args.get("categories", "").split(","))); types = set(filter(None, request.args.get("types", "").lower().split(","))); duplicates = request.args.get("duplicates") == "1"; demo = request.args.get("demo") == "true"; rows = demo_document_rows() if demo else read_rows()
     # Requested tokens may reference a tag that was since renamed/merged; resolve them to their current canonical value.
     aliases = tag_aliases()
     tokens = {canonical_tag(token, aliases) for token in filter(None, request.args.get("tokens", "").split(","))}
     selected_id = request.args.get("document", "").strip()
     duplicate_hashes = {value for value, count in Counter(row.get("file_hash") for row in rows if row.get("file_hash")).items() if count > 1}
-    searched = search_rows(rows, query); files = [row for row in searched if (not years or row.get("year") in years) and (not categories or row.get("category") in categories) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
-    year_rows = [row for row in searched if (not categories or row.get("category") in categories) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
-    category_rows = [row for row in searched if (not years or row.get("year") in years) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
-    tag_rows = [row for row in searched if (not years or row.get("year") in years) and (not categories or row.get("category") in categories) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
+    document_type = lambda row: Path(row.get("stored_path", row.get("original_name", ""))).suffix.lower().removeprefix(".") or "unknown"
+    searched = search_rows(rows, query); files = [row for row in searched if (not years or row.get("year") in years) and (not categories or row.get("category") in categories) and (not types or document_type(row) in types) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
+    year_rows = [row for row in searched if (not categories or row.get("category") in categories) and (not types or document_type(row) in types) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
+    category_rows = [row for row in searched if (not years or row.get("year") in years) and (not types or document_type(row) in types) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
+    type_rows = [row for row in searched if (not years or row.get("year") in years) and (not categories or row.get("category") in categories) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
+    tag_rows = [row for row in type_rows if not types or document_type(row) in types]
     counts = Counter(tag for row in tag_rows for tag in row_tags(row))
     files.sort(key=lambda row: (row.get("date", ""), row.get("stored_path", "")), reverse=True)
     selected_row = next((row for row in rows if row.get("id") == selected_id), None)
@@ -797,7 +830,8 @@ def api_index():
     serializer = serialize_demo_row if demo else serialize_row
     category_counts = Counter(row.get("category") for row in category_rows if row.get("category"))
     category_values = list(dict.fromkeys(read_settings()["categories"] + sorted(category_counts)))
-    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "categories": [{"value": value, "count": category_counts[value], "selected": value in categories} for value in category_values], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [serializer(row, duplicate_counts) for row in files], "selected_file": serializer(selected_row, duplicate_counts) if selected_row else None})
+    type_counts = Counter(document_type(row) for row in type_rows)
+    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "categories": [{"value": value, "count": category_counts[value], "selected": value in categories} for value in category_values], "types": [{"value": value, "count": count, "selected": value in types} for value, count in sorted(type_counts.items())], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [serializer(row, duplicate_counts) for row in files], "selected_file": serializer(selected_row, duplicate_counts) if selected_row else None})
 
 @app.get("/api/external/v1/catalog")
 def external_catalog():

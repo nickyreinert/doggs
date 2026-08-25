@@ -29,6 +29,10 @@
       <label for="categories">Categories <span class="shortcut-hint">Ctrl+W</span></label>
       <select id="categories" multiple size="5"></select>
     </section>
+    <section class="type-panel">
+      <label for="types">Document type</label>
+      <select id="types" multiple size="5"></select>
+    </section>
     <section class="search-panel">
       <label class="quick-label" for="query">Quick search <span class="shortcut-hint">Ctrl+Q</span></label>
       <input id="query" type="search" placeholder="Filename, date, classification…">
@@ -103,7 +107,7 @@
         <div class="editor-status" id="editorStatus"></div>
       </div>
     </div>
-    <iframe id="frame" title="PDF preview"></iframe>
+    <iframe id="frame" title="Document preview"></iframe>
     <div id="duplicatesView">
       <div class="dupes-head">
         <span class="meta">Click the bin icon on a copy to remove it.</span>

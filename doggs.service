@@ -1,5 +1,5 @@
 [Unit]
-Description=DOGGS local PDF archive
+Description=DOGGS local document archive
 After=network-online.target local-fs.target remote-fs.target
 Wants=network-online.target
 

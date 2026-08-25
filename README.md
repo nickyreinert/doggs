@@ -1,13 +1,13 @@
 # DOGGS
 
-DOGGS is a small, self-hosted PDF inbox and archive for a Mac, Ubuntu server, or NAS. Drop PDFs into an incoming folder and DOGGS extracts header text, optionally uses local OCR and local AI, stores the document in a dated archive, and keeps a plain CSV index.
+DOGGS is a small, self-hosted document inbox and archive for a Mac, Ubuntu server, or NAS. Drop PDFs, Office files, open document formats, text files, or tabular data into an incoming folder and DOGGS extracts text, optionally uses local OCR and local AI, stores the document in a dated archive, and keeps a plain CSV index.
 
 It has no cloud account, no database server, and no mandatory AI dependency.
 
 ## What it does
 
 - Watches an inbox for supported documents every five minutes, and scans once immediately at startup.
-- Reads embedded PDF metadata (title, author, subject, keywords, creator, producer, and dates) and extracts visible text from the top of the first two pages.
+- Reads embedded PDF metadata (title, author, subject, keywords, creator, producer, and dates) and extracts text from PDFs, DOCX, XLSX, PPTX, ODT, ODS, ODP, CSV, TSV, TXT, Markdown, HTML, XML, JSON, YAML, RTF, EPUB, and similar text-based files.
 - Uses Tesseract OCR for scanned PDFs with little embedded text.
 - Optionally asks a local Ollama model for date, classification, main category, filename slug, and summary.
 - Falls back to deterministic rules when Ollama is unavailable.
@@ -53,7 +53,7 @@ For a local installation, start DOGGS with:
 ./run.sh
 ```
 
-Open [http://localhost:8383](http://localhost:8383), drop PDFs into the configured incoming folder, and use the expandable **Pipeline** footer to inspect waiting files or trigger a manual scan.
+Open [http://localhost:8383](http://localhost:8383), drop supported documents into the configured incoming folder, and use the expandable **Pipeline** footer to inspect waiting files or trigger a manual scan.
 
 ### Updating
 
@@ -85,7 +85,7 @@ incoming/ ──→ text extraction / OCR / metadata ──→ archive/YYYY/
                  └── processing failure ─→ errors/
 ```
 
-PDFs are moved, not copied, after processing. Keep a source-scanner folder separate if it needs its own retention policy.
+Supported documents are moved, not copied, after processing. OCR actions are available for PDFs; native text extraction is used for the other formats. Keep a source-scanner folder separate if it needs its own retention policy.
 
 ## Installation
 

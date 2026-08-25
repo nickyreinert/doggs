@@ -1,4 +1,4 @@
-const state = { q: '', years: new Set(), categories: new Set(), tags: new Set(), duplicates: false, demo: false, selected: null, requestedDocument: '' };
+const state = { q: '', years: new Set(), categories: new Set(), types: new Set(), tags: new Set(), duplicates: false, demo: false, selected: null, requestedDocument: '' };
 let files = [], timer, availableYears = [], visibleTags = [], tagAliases = {}, activeSettingsTab = 'tags';
 const $ = id => document.getElementById(id);
 const THEME_KEY = 'doggs-theme';
@@ -14,6 +14,7 @@ function syncUrl(push = false) {
   if (state.q) p.set('q', state.q);
   if (state.years.size) p.set('years', [...state.years].join(','));
   if (state.categories.size) p.set('categories', [...state.categories].join(','));
+  if (state.types.size) p.set('types', [...state.types].join(','));
   if (state.tags.size) p.set('tags', [...state.tags].join(','));
   if (state.duplicates) p.set('duplicates', '1');
   if (state.demo) p.set('demo', 'true');
@@ -28,6 +29,7 @@ function restoreUrlState() {
   state.q = p.get('q') || '';
   state.years = new Set((p.get('years') || '').split(',').filter(Boolean));
   state.categories = new Set((p.get('categories') || '').split(',').filter(Boolean));
+  state.types = new Set((p.get('types') || '').split(',').filter(Boolean));
   state.tags = new Set((p.get('tags') || '').split(',').filter(Boolean));
   state.duplicates = p.get('duplicates') === '1';
   state.demo = p.get('demo') === 'true';
@@ -47,6 +49,7 @@ async function refresh() {
   if (state.q) p.set('q', state.q);
   if (state.years.size) p.set('years', [...state.years].join(','));
   if (state.categories.size) p.set('categories', [...state.categories].join(','));
+  if (state.types.size) p.set('types', [...state.types].join(','));
   if (state.tags.size) p.set('tokens', [...state.tags].join(','));
   if (state.duplicates) p.set('duplicates', '1');
   if (state.demo) p.set('demo', 'true');
@@ -60,6 +63,8 @@ async function refresh() {
   [...$('years').options].forEach(o => o.selected = state.years.size ? state.years.has(o.value) : o.value === '');
   $('categories').innerHTML = '<option value="">All categories</option>' + (d.categories || []).map(i => '<option value="' + i.value + '">' + i.value + ' (' + i.count + ')</option>').join('');
   [...$('categories').options].forEach(o => o.selected = state.categories.size ? state.categories.has(o.value) : o.value === '');
+  $('types').innerHTML = '<option value="">All types</option>' + (d.types || []).map(i => '<option value="' + i.value + '">' + i.value.toUpperCase() + ' (' + i.count + ')</option>').join('');
+  [...$('types').options].forEach(o => o.selected = state.types.size ? state.types.has(o.value) : o.value === '');
   renderTags(d.tags || []);
   $('duplicateCount').textContent = d.duplicates_count || 0;
   renderFiles(d.files || []);
@@ -563,6 +568,13 @@ $('categories').onchange = e => {
   syncUrl(true);
   refresh();
 };
+$('types').onchange = e => {
+  const all = [...e.target.options].find(option => option.value === '');
+  state.types = all?.selected ? new Set() : new Set([...e.target.selectedOptions].map(option => option.value).filter(Boolean));
+  if (all) all.selected = !state.types.size;
+  syncUrl(true);
+  refresh();
+};
 $('query').oninput = e => { state.q = e.target.value.trim(); syncUrl(); clearTimeout(timer); timer = setTimeout(refresh, 250) };
 $('tagSearch').oninput = () => renderTags(visibleTags);
 $('tagAliasSearch').oninput = renderTagAliases;
@@ -570,8 +582,8 @@ $('tagInput').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); ad
 $('documentTitle').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur() } };
 $('duplicates').onchange = e => { state.duplicates = e.target.checked; $('cleanDuplicatesButton').hidden = !state.duplicates; syncUrl(true); refresh() };
 $('resetFilters').onclick = () => {
-  state.q = ''; state.years = new Set(); state.categories = new Set(); state.tags = new Set(); state.duplicates = false;
-  $('query').value = ''; $('categories').selectedIndex = 0; $('duplicates').checked = false; $('tagSearch').value = ''; $('cleanDuplicatesButton').hidden = true;
+  state.q = ''; state.years = new Set(); state.categories = new Set(); state.types = new Set(); state.tags = new Set(); state.duplicates = false;
+  $('query').value = ''; $('categories').selectedIndex = 0; $('types').selectedIndex = 0; $('duplicates').checked = false; $('tagSearch').value = ''; $('cleanDuplicatesButton').hidden = true;
   syncUrl(true);
   refresh();
 };
