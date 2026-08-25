@@ -686,10 +686,44 @@ def process_file(path):
     rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "category": category, "summary": (heuristics["summary"] if heuristics["classification"] == "invoice" else ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(inferred), "removed_tags": "", "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
     write_rows(rows); log.info("Archived %s", destination)
 
+def reconcile_archive_locations():
+    """Move indexed documents into the year directory recorded in the index."""
+    rows = read_rows(); changed = False
+    for row in rows:
+        if row.get("location") == "duplicates":
+            continue
+        if not row.get("location"):
+            row["location"] = "archive"
+            changed = True
+        current_path = file_path_for_row(row)
+        if not current_path.is_file():
+            log.warning("Indexed document is missing: %s", current_path)
+            continue
+        year = str(row.get("year", "")).strip()
+        if not re.fullmatch(r"\d{4}", year):
+            parsed_date = parse_any_date(row.get("date"))
+            if not parsed_date:
+                log.warning("Cannot determine archive year for %s", current_path)
+                continue
+            year = str(parsed_date.year)
+            row["year"] = year
+        destination = ARCHIVE_DIR / year / current_path.name
+        if current_path != destination.resolve():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination = unique_path(destination)
+            shutil.move(str(current_path), destination)
+            row["stored_path"] = destination.relative_to(ARCHIVE_DIR).as_posix()
+            changed = True
+            log.info("Reconciled archive location: %s", destination)
+    if changed:
+        write_rows(rows)
+    return changed
+
 def scan_incoming():
     if not SCAN_LOCK.acquire(blocking=False):
         return
     try:
+        reconcile_archive_locations()
         managed_dirs = (ARCHIVE_DIR, ERROR_DIR, DUPLICATE_DIR, TRASH_DIR)
         source_paths = INCOMING_DIR.rglob("*") if RECURSIVE_SCAN else INCOMING_DIR.iterdir()
         candidates = sorted((p for p in source_paths if p.is_file() and p.suffix.lower() in SUPPORTED_FORMATS and not any(is_within(directory, p) for directory in managed_dirs)), key=lambda p: p.stat().st_mtime)
