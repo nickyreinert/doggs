@@ -8,6 +8,7 @@ import logging
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import threading
 import time
@@ -69,7 +70,7 @@ TEXT_FORMATS = {
 SUPPORTED_FORMATS = {".pdf", *TEXT_FORMATS}
 LLM_SOURCE_LINES = int(os.getenv("LLM_SOURCE_LINES", "80"))
 DEFAULT_CATEGORIES = ["financial-document", "invoice", "incoming", "outgoing", "banking", "tax-office", "insurance", "contract", "personal", "misc"]
-FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "category", "summary", "tokens", "removed_tags", "tags", "ocr_text", "is_duplicate", "duplicate_of", "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer", "source", "created_at"]
+FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "category", "rule_name", "rule_reason", "summary", "tokens", "removed_tags", "tags", "ocr_text", "is_duplicate", "duplicate_of", "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer", "source", "created_at"]
 STOP_TAGS = {"the", "and", "for", "doc", "document", "pdf", "misc", "unknown", "fpdf", "pdflib", "printer", "linux", "php", "kunde", "page", "pages", "creator", "producer"}
 PROMPT_STOP_WORDS = STOP_TAGS | {"a", "an", "are", "as", "at", "be", "by", "from", "in", "is", "it", "of", "on", "or", "that", "this", "to", "with", "der", "die", "das", "den", "dem", "des", "ein", "eine", "einer", "einem", "einen", "und", "oder", "ist", "im", "in", "am", "an", "auf", "von", "für", "mit", "zu", "bei", "als", "auch", "nicht", "wie", "dass"}
 CLASSIFICATION_RULES = [("invoice", ["invoice", "rechnung", "billing", "amount due", "zahlung"]), ("bank", ["bank statement", "kontoauszug", "iban", "balance", "transaction"]), ("insurance", ["insurance", "versicherung", "policy", "claim", "premium"]), ("contract", ["contract", "agreement", "vertrag", "terms"]), ("tax", ["tax", "steuer", "finanzamt", "vat"]), ("medical", ["medical", "arzt", "doctor", "patient"]), ("utility", ["electricity", "gas", "water", "internet", "phone"]), ("salary", ["salary", "payroll", "gehalt", "lohn"]), ("official", ["authority", "bescheid", "government", "court"]), ("receipt", ["receipt", "quittung", "purchase"])]
@@ -205,13 +206,36 @@ def read_settings():
     raw_general = data.get("general")
     general = {**current_general_defaults(), **(raw_general or {})}
     categories = list(dict.fromkeys(tag_values(data.get("categories", DEFAULT_CATEGORIES)))) or list(DEFAULT_CATEGORIES)
+    rules = [normalize_rule(rule) for rule in data.get("rules", []) if isinstance(rule, dict)]
     external_api = data.get("external_api") if isinstance(data.get("external_api"), dict) else {}
     share_url = str(external_api.get("smb_share_url") or "").strip().rstrip("/")
-    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "tag_aliases": aliases, "categories": categories, "external_api": {"port": PORT, "token_configured": bool(EXTERNAL_API_TOKEN), "smb_share_url": share_url}, "general": general, "general_configured": general_is_configured(raw_general), "general_locked": general_locked_fields(), "prompts": {"metadata": metadata_prompt, "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
+    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "tag_aliases": aliases, "categories": categories, "rules": rules, "external_api": {"port": PORT, "token_configured": bool(EXTERNAL_API_TOKEN), "smb_share_url": share_url}, "general": general, "general_configured": general_is_configured(raw_general), "general_locked": general_locked_fields(), "prompts": {"metadata": metadata_prompt, "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
 
 def write_settings(settings):
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_PATH.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+
+def normalize_rule(rule):
+    """Sanitize one auto-tagging rule; unknown/blank fields fall back to safe defaults."""
+    if not isinstance(rule, dict): rule = {}
+    conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+    extension = re.sub(r"[^a-z0-9]", "", str(conditions.get("extension") or "").strip().lower())
+    category = str(rule.get("category") or "").strip()
+    try: content_chars = max(1, min(5000, int(rule.get("content_chars") or 500)))
+    except (TypeError, ValueError): content_chars = 500
+    return {
+        "id": str(rule.get("id") or "").strip() or secrets.token_hex(6),
+        "name": str(rule.get("name") or "").strip()[:80],
+        "enabled": rule.get("enabled", True) not in (False, "false", "0", 0),
+        "conditions": {
+            "extension": extension,
+            "name_contains": str(conditions.get("name_contains") or "").strip()[:200],
+            "content_contains": str(conditions.get("content_contains") or "").strip()[:200],
+        },
+        "content_chars": content_chars,
+        "category": slugify(category) if category else "",
+        "tags": tag_values(rule.get("tags", [])),
+    }
 
 GENERAL_ENV_MAP = {"incoming_dir": "INCOMING_DIR", "archive_dir": "ARCHIVE_DIR", "error_dir": "ERROR_DIR", "duplicate_dir": "DUPLICATE_DIR", "trash_dir": "TRASH_DIR", "recursive_scan": "RECURSIVE_SCAN", "ocr_lang": "OCR_LANG", "ai_mode": "AI_MODE", "ollama_url": "OLLAMA_URL", "ai_model": "AI_MODEL"}
 
@@ -478,6 +502,33 @@ def combined_tags(heuristic, extracted, text):
     extra = relevant_ai_tags(extracted.get("tags", []), text)
     return list(dict.fromkeys(base + extra))
 
+def rule_match_reasons(rule, filename, suffix, text):
+    """Return the matched-condition descriptions for one rule, or [] if any condition fails."""
+    conditions = rule.get("conditions") or {}
+    reasons = []
+    extension = conditions.get("extension", "")
+    if extension:
+        if suffix != extension: return []
+        reasons.append(f'extension is "{extension}"')
+    name_contains = conditions.get("name_contains", "")
+    if name_contains:
+        if name_contains.lower() not in filename.lower(): return []
+        reasons.append(f'filename contains "{name_contains}"')
+    content_contains = conditions.get("content_contains", "")
+    if content_contains:
+        chars = max(1, int(rule.get("content_chars") or 500))
+        if content_contains.lower() not in text[:chars].lower(): return []
+        reasons.append(f'first {chars} characters contain "{content_contains}"')
+    return reasons
+
+def match_rule(filename, suffix, text):
+    """Return the first enabled rule (in priority order) whose conditions all match, plus why."""
+    for rule in read_settings().get("rules", []):
+        if not rule.get("enabled", True): continue
+        reasons = rule_match_reasons(rule, filename, suffix, text)
+        if reasons: return rule, reasons
+    return None, []
+
 def resolved_category(extracted, classification, categories):
     """Keep a valid LLM category, otherwise map reliable local classifications."""
     candidate = slugify(extracted.get("category"))
@@ -486,12 +537,20 @@ def resolved_category(extracted, classification, categories):
     fallback = fallback_by_classification.get(classification, "misc")
     return fallback if fallback in categories else "misc"
 
-def replace_extracted_result(row, heuristic, extracted, text):
+def replace_extracted_result(row, heuristic, extracted, text, filename):
     """Replace generated fields only; the user's manual `tags` field is immutable here."""
     tags = combined_tags(heuristic, extracted, text)
     row["classification"] = slugify(heuristic["classification"] if heuristic["classification"] != "document" else extracted.get("classification") or "document")
     categories = read_settings()["categories"]
     row["category"] = resolved_category(extracted, row["classification"], categories)
+    suffix = Path(filename).suffix.lower().removeprefix(".")
+    rule, reasons = match_rule(filename, suffix, text)
+    if rule:
+        if rule.get("category") and rule["category"] in categories: row["category"] = rule["category"]
+        tags = list(dict.fromkeys(tags + rule.get("tags", [])))
+        row["rule_name"], row["rule_reason"] = rule.get("name") or "Unnamed rule", "; ".join(reasons)
+    else:
+        row["rule_name"], row["rule_reason"] = "", ""
     row["summary"] = (heuristic["summary"] if heuristic["classification"] == "invoice" else extracted.get("summary") or heuristic["summary"]).strip()[:240]
     row["tokens"] = " ".join(tags)
     row["removed_tags"] = ""
@@ -512,8 +571,8 @@ def update_generated_filename(row):
         shutil.move(str(current_path), destination)
     row["stored_path"] = destination.relative_to(ARCHIVE_DIR).as_posix()
 
-def replace_extracted_result_and_filename(row, heuristic, extracted, text):
-    replace_extracted_result(row, heuristic, extracted, text)
+def replace_extracted_result_and_filename(row, heuristic, extracted, text, filename):
+    replace_extracted_result(row, heuristic, extracted, text, filename)
     update_generated_filename(row)
     return row
 
@@ -598,7 +657,7 @@ def run_normal_pipeline(row_id):
         analysis = f"{metadata} {text}".strip()
         heuristic, extracted = heuristic_extract(analysis, path.name), ai_extract(analysis, path.suffix.lower() != ".pdf")
         def apply_extraction(item):
-            replace_extracted_result_and_filename(item, heuristic, extracted, analysis)
+            replace_extracted_result_and_filename(item, heuristic, extracted, analysis, path.name)
             item["source"] = source
         if not mutate_row(row_id, apply_extraction): raise ValueError("Document no longer exists in the index.")
         NORMAL_SCAN_STATE[row_id] = {"state": "complete", "error": ""}
@@ -612,11 +671,12 @@ def run_llm_rerun(row_ids):
         for row_id in row_ids:
             rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
             if row:
+                filename = Path(row["stored_path"]).name
                 text, _, metadata_fields, _ = document_content(file_path_for_row(row))
                 metadata = " ".join(metadata_fields[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if metadata_fields.get(key))
                 analysis = f"{metadata} {text}".strip()
-                heuristic, extracted = heuristic_extract(analysis, Path(row["stored_path"]).name), ai_extract(analysis, Path(row["stored_path"]).suffix.lower() != ".pdf")
-                if not mutate_row(row_id, lambda item: replace_extracted_result_and_filename(item, heuristic, extracted, analysis)):
+                heuristic, extracted = heuristic_extract(analysis, filename), ai_extract(analysis, Path(filename).suffix.lower() != ".pdf")
+                if not mutate_row(row_id, lambda item: replace_extracted_result_and_filename(item, heuristic, extracted, analysis, filename)):
                     raise ValueError("Document no longer exists in the index.")
             LLM_RERUN_STATE["current"] += 1
         LLM_RERUN_STATE["state"] = "complete"
@@ -653,7 +713,7 @@ def run_bulk_rescan(row_ids):
                 analysis = f"{metadata} {text}".strip()
                 heuristic, extracted = heuristic_extract(analysis, path.name), ai_extract(analysis, path.suffix.lower() != ".pdf")
                 def apply_extraction(item):
-                    replace_extracted_result_and_filename(item, heuristic, extracted, analysis)
+                    replace_extracted_result_and_filename(item, heuristic, extracted, analysis, path.name)
                     item["ocr_text"] = text; item["source"] = source
                 if not mutate_row(row_id, apply_extraction): raise ValueError("Document no longer exists in the index.")
             except Exception as exc:
@@ -679,11 +739,18 @@ def process_file(path):
     final_date = parse_any_date(ai.get("date")) or parse_text_date(analysis_text) or pdf_date or datetime.fromtimestamp(path.stat().st_mtime).date()
     classification = slugify(ai.get("classification") or heuristics["classification"])
     inferred = combined_tags(heuristics, ai, analysis_text)
+    categories = read_settings()["categories"]
+    category = resolved_category(ai, classification, categories)
+    rule, reasons = match_rule(path.name, path.suffix.lower().removeprefix("."), analysis_text)
+    rule_name, rule_reason = "", ""
+    if rule:
+        if rule.get("category") and rule["category"] in categories: category = rule["category"]
+        inferred = list(dict.fromkeys(inferred + rule.get("tags", [])))
+        rule_name, rule_reason = rule.get("name") or "Unnamed rule", "; ".join(reasons)
     slug = slugify("-".join(inferred[:3]) or heuristics["slug"] or classification)
     destination = unique_path(ARCHIVE_DIR / str(final_date.year) / f"{final_date.isoformat()}_{slug}{path.suffix.lower()}"); destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(path), destination)
-    category = resolved_category(ai, classification, read_settings()["categories"])
-    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "category": category, "summary": (heuristics["summary"] if heuristics["classification"] == "invoice" else ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(inferred), "removed_tags": "", "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
+    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "category": category, "rule_name": rule_name, "rule_reason": rule_reason, "summary": (heuristics["summary"] if heuristics["classification"] == "invoice" else ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(inferred), "removed_tags": "", "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
     write_rows(rows); log.info("Archived %s", destination)
 
 def reconcile_archive_locations():
@@ -975,7 +1042,7 @@ def file_details(row_id):
         row["ocr_text"] = str((request.get_json(silent=True) or {}).get("ocr_text", ""))[:MAX_FULL_TEXT_CHARS]
         write_rows(rows)
     metadata = {key.removeprefix("pdf_"): row.get(key, "") for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer") if row.get(key)}
-    return jsonify({"ocr_text": row.get("ocr_text", ""), "full_path": str(file_path_for_row(row)), "metadata": metadata, "ocr_scan": OCR_SCAN_STATE.get(row_id, {}), "normal_scan": NORMAL_SCAN_STATE.get(row_id, {})})
+    return jsonify({"ocr_text": row.get("ocr_text", ""), "full_path": str(file_path_for_row(row)), "metadata": metadata, "rule_name": row.get("rule_name", ""), "rule_reason": row.get("rule_reason", ""), "ocr_scan": OCR_SCAN_STATE.get(row_id, {}), "normal_scan": NORMAL_SCAN_STATE.get(row_id, {})})
 
 @app.post("/api/file/<row_id>/ocr")
 def ocr_file(row_id):
@@ -1105,6 +1172,8 @@ def settings():
         current = read_settings(); current["ignored_tags"] = sorted(set(tag_values(payload.get("ignored_tags", current["ignored_tags"]))))
         if "categories" in payload:
             current["categories"] = list(dict.fromkeys(tag_values(payload["categories"]))) or list(DEFAULT_CATEGORIES)
+        if "rules" in payload and isinstance(payload["rules"], list):
+            current["rules"] = [normalize_rule(rule) for rule in payload["rules"] if isinstance(rule, dict)]
         external_api_payload = payload.get("external_api")
         if isinstance(external_api_payload, dict):
             share_url = str(external_api_payload.get("smb_share_url", "")).strip().rstrip("/")

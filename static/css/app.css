@@ -140,3 +140,19 @@ html[data-theme="midnight"] .category-panel>label{color:#8a97a8}html[data-theme=
 .type-panel select{height:auto;min-height:0;flex:1;margin-bottom:0}
 @media(max-width:1050px){.header-grid{grid-template-columns:145px 155px 145px minmax(0,1fr)}}
 @media(max-width:900px){.header-grid{grid-template-columns:1fr}.type-panel select{height:82px;min-height:82px}}
+
+/* Rules: settings tab cards, and the matched-rule indicator shown on documents */
+.rule-list{display:flex;flex-direction:column;gap:10px;margin-bottom:10px}
+.rule-card{border:1px solid #dbe1e8;border-radius:9px;padding:10px;background:#f8fafc}
+.rule-card-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.rule-card-head .rule-name{flex:1;min-width:0;margin-bottom:0}
+.rule-enabled{display:flex;align-items:center;gap:5px;white-space:nowrap;font-size:12px;color:#405166}
+.rule-enabled input{width:14px;height:14px;min-height:0;margin:0;padding:0}
+.rule-card-head .icon-button{width:28px;height:28px;padding:0;flex:none}
+.rule-card-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px}
+.rule-card-grid .editor{margin:0}
+.rule-card-grid .editor span{display:block;margin:0 0 4px;color:#68788b;font-size:10px;font-weight:650;letter-spacing:.06em;text-transform:uppercase}
+.rule-card-grid input,.rule-card-grid select{margin-bottom:0}
+.rule-badge{display:inline-block;margin-top:2px;padding:3px 8px;border-radius:99px;background:#fff3cd;color:#7a5b00;font-size:11px;font-weight:650}
+.meta-values .rule-chip{background:#fff3cd;color:#7a5b00}
+@media(max-width:900px){.rule-card-grid{grid-template-columns:1fr}}

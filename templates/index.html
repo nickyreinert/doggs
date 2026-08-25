@@ -60,6 +60,7 @@
         <div class="preview-head-info">
           <div class="document-title" id="documentTitle" contenteditable="true" role="textbox" aria-label="Document title">Select a document</div>
           <div class="document-meta" id="documentMeta">Its details and preview will appear here.</div>
+          <span class="rule-badge" id="ruleMatchBadge" hidden></span>
         </div>
         <div class="editor-actions" id="editorActions" hidden>
           <button class="action" id="saveDetails">Save details</button>
@@ -145,6 +146,7 @@
     <button type="button" class="settings-tab" data-tab="general">General</button>
     <button type="button" class="settings-tab active" data-tab="tags">Tags</button>
     <button type="button" class="settings-tab" data-tab="categories">Categories</button>
+    <button type="button" class="settings-tab" data-tab="rules">Rules</button>
     <button type="button" class="settings-tab" data-tab="external-api">External API</button>
     <button type="button" class="settings-tab" data-tab="prompts">LLM prompts</button>
     <button type="button" class="settings-tab" data-tab="schedule">Background schedule</button>
@@ -188,6 +190,11 @@
     <p>One category per line. The LLM must assign every processed document to one of these categories.</p>
     <label class="editor" for="categoriesInput">Document categories</label>
     <textarea id="categoriesInput" placeholder="financial-document&#10;invoice&#10;incoming&#10;outgoing&#10;banking&#10;tax-office&#10;insurance&#10;contract&#10;personal&#10;misc"></textarea>
+  </section>
+  <section class="settings-pane" data-pane="rules" hidden>
+    <p>Rules run top to bottom during processing; the first enabled rule whose conditions all match sets the category and adds tags. Leave a condition blank to skip it.</p>
+    <div class="rule-list" id="ruleList"></div>
+    <button type="button" class="action" id="addRuleButton">Add rule</button>
   </section>
   <section class="settings-pane" data-pane="external-api" hidden>
     <p>External integrations use the same server port as DOGGS and require the <code>EXTERNAL_API_TOKEN</code> environment variable.</p>

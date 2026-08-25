@@ -219,6 +219,16 @@ function selectFile(f, load = true, updateUrl = true) {
   $('allPages').closest('label').hidden = !isPdf;
   $('documentTitle').textContent = f.pdf_title || f.name;
   $('documentMeta').textContent = [f.name, f.pdf_author, f.date, f.category, f.classification, f.is_duplicate ? 'Duplicate content' : ''].filter(Boolean).join(' • ');
+  const ruleBadge = $('ruleMatchBadge');
+  if (f.rule_name) {
+    ruleBadge.hidden = false;
+    ruleBadge.textContent = 'Matched rule: ' + f.rule_name;
+    ruleBadge.title = f.rule_reason ? 'Why: ' + f.rule_reason : '';
+  } else {
+    ruleBadge.hidden = true;
+    ruleBadge.textContent = '';
+    ruleBadge.title = '';
+  }
   $('tagInput').value = '';
   $('filenameInput').value = f.name;
   $('summaryInput').value = f.summary || '';
@@ -331,6 +341,12 @@ async function loadMetadata(id) {
   const values = $('metaValues');
   values.innerHTML = '';
   if (d.full_path) { const path = document.createElement('span'); path.className = 'full-path'; path.textContent = 'Path: ' + d.full_path; values.append(path) }
+  if (d.rule_name) {
+    const chip = document.createElement('span');
+    chip.className = 'rule-chip';
+    chip.textContent = 'Matched rule: ' + d.rule_name + (d.rule_reason ? ' — ' + d.rule_reason : '');
+    values.append(chip);
+  }
   Object.entries(d.metadata || {}).forEach(([key, value]) => { const chip = document.createElement('span'); chip.textContent = key + ': ' + value; values.append(chip) });
 }
 
@@ -445,6 +461,8 @@ function showSettingsTab(name, updateUrl = true) {
 
 document.querySelectorAll('[data-theme-choice]').forEach(card => card.onclick = () => applyTheme(card.dataset.themeChoice));
 
+$('addRuleButton').onclick = addRule;
+
 function updateScheduleFields() {
   const daily = $('scheduleMode').value === 'daily';
   $('intervalSchedule').hidden = daily;
@@ -452,6 +470,100 @@ function updateScheduleFields() {
 }
 
 const GENERAL_FIELDS = { generalIncoming: 'incoming_dir', generalArchive: 'archive_dir', generalError: 'error_dir', generalDuplicate: 'duplicate_dir', generalTrash: 'trash_dir', generalOcrLang: 'ocr_lang', generalAiMode: 'ai_mode', generalOllamaUrl: 'ollama_url', generalAiModel: 'ai_model' };
+
+let ruleCategories = [];
+
+function createRuleRow(rule) {
+  const row = document.createElement('div');
+  row.className = 'rule-card';
+  row.dataset.ruleId = rule.id || '';
+
+  const head = document.createElement('div');
+  head.className = 'rule-card-head';
+  const name = document.createElement('input');
+  name.className = 'rule-name';
+  name.placeholder = 'Rule name';
+  name.value = rule.name || '';
+  const enabledLabel = document.createElement('label');
+  enabledLabel.className = 'rule-enabled';
+  const enabled = document.createElement('input');
+  enabled.type = 'checkbox';
+  enabled.checked = rule.enabled !== false;
+  enabledLabel.append(enabled, document.createTextNode(' Enabled'));
+  const up = document.createElement('button');
+  up.type = 'button'; up.className = 'icon-button rule-up'; up.textContent = '↑'; up.title = 'Move up'; up.setAttribute('aria-label', 'Move rule up');
+  up.onclick = () => { const prev = row.previousElementSibling; if (prev) row.parentElement.insertBefore(row, prev) };
+  const down = document.createElement('button');
+  down.type = 'button'; down.className = 'icon-button rule-down'; down.textContent = '↓'; down.title = 'Move down'; down.setAttribute('aria-label', 'Move rule down');
+  down.onclick = () => { const next = row.nextElementSibling; if (next) row.parentElement.insertBefore(next, row) };
+  const remove = document.createElement('button');
+  remove.type = 'button'; remove.className = 'icon-button rule-remove'; remove.textContent = '✕'; remove.title = 'Remove rule'; remove.setAttribute('aria-label', 'Remove rule');
+  remove.onclick = () => row.remove();
+  head.append(name, enabledLabel, up, down, remove);
+
+  const grid = document.createElement('div');
+  grid.className = 'rule-card-grid';
+  const field = (labelText, input) => {
+    const label = document.createElement('label');
+    label.className = 'editor';
+    const span = document.createElement('span');
+    span.textContent = labelText;
+    label.append(span, input);
+    return label;
+  };
+  const extension = document.createElement('input');
+  extension.className = 'rule-extension'; extension.placeholder = 'csv'; extension.value = rule.conditions?.extension || '';
+  const nameContains = document.createElement('input');
+  nameContains.className = 'rule-name-contains'; nameContains.placeholder = 'kontoauszug'; nameContains.value = rule.conditions?.name_contains || '';
+  const contentContains = document.createElement('input');
+  contentContains.className = 'rule-content-contains'; contentContains.placeholder = 'IBAN'; contentContains.value = rule.conditions?.content_contains || '';
+  const contentChars = document.createElement('input');
+  contentChars.className = 'rule-content-chars'; contentChars.type = 'number'; contentChars.min = '1'; contentChars.max = '5000'; contentChars.value = rule.content_chars || 500;
+  const category = document.createElement('select');
+  category.className = 'rule-category';
+  category.innerHTML = '<option value="">Don\'t change</option>' + ruleCategories.map(value => '<option value="' + value + '">' + value + '</option>').join('');
+  category.value = rule.category || '';
+  const tags = document.createElement('input');
+  tags.className = 'rule-tags'; tags.placeholder = 'bank, kontoauszug'; tags.value = (rule.tags || []).join(', ');
+  grid.append(
+    field('Extension', extension),
+    field('Filename contains', nameContains),
+    field('First N characters contain', contentContains),
+    field('Characters to check', contentChars),
+    field('Set category', category),
+    field('Add tags', tags),
+  );
+
+  row.append(head, grid);
+  return row;
+}
+
+function renderRules(rules, categories) {
+  ruleCategories = categories || [];
+  const list = $('ruleList');
+  list.innerHTML = '';
+  (rules || []).forEach(rule => list.append(createRuleRow(rule)));
+}
+
+function addRule() {
+  $('ruleList').append(createRuleRow({ name: '', enabled: true, conditions: {}, content_chars: 500, category: '', tags: [] }));
+}
+
+function collectRules() {
+  return [...$('ruleList').querySelectorAll('.rule-card')].map(row => ({
+    id: row.dataset.ruleId || undefined,
+    name: row.querySelector('.rule-name').value.trim(),
+    enabled: row.querySelector('.rule-enabled input').checked,
+    conditions: {
+      extension: row.querySelector('.rule-extension').value.trim(),
+      name_contains: row.querySelector('.rule-name-contains').value.trim(),
+      content_contains: row.querySelector('.rule-content-contains').value.trim(),
+    },
+    content_chars: Number(row.querySelector('.rule-content-chars').value) || 500,
+    category: row.querySelector('.rule-category').value,
+    tags: row.querySelector('.rule-tags').value.split(/[\s,]+/).map(value => value.trim()).filter(Boolean),
+  }));
+}
 
 function populateGeneralSettings(general, locked) {
   Object.entries(GENERAL_FIELDS).forEach(([id, key]) => {
@@ -468,6 +580,7 @@ async function openSettings(updateUrl = true) {
   const s = await (await fetch('/api/settings')).json();
   $('ignoredTags').value = s.ignored_tags.join(', ');
   $('categoriesInput').value = (s.categories || []).join('\n');
+  renderRules(s.rules || [], s.categories || []);
   $('externalApiPort').value = s.external_api?.port ?? '';
   $('externalApiTokenStatus').value = s.external_api?.token_configured ? 'Configured via EXTERNAL_API_TOKEN' : 'Not configured; external API is disabled';
   $('smbShareUrl').value = s.external_api?.smb_share_url || '';
@@ -492,6 +605,7 @@ async function saveSettings(event) {
   const payload = {
     ignored_tags: $('ignoredTags').value.split(/[\s,]+/).filter(Boolean),
     categories: $('categoriesInput').value.split(/[\n,]+/).map(value => value.trim()).filter(Boolean),
+    rules: collectRules(),
     external_api: { smb_share_url: $('smbShareUrl').value.trim() },
     prompts: { metadata: $('metadataPrompt').value, summary: $('summaryPrompt').value },
     schedule: { mode: $('scheduleMode').value, interval_minutes: $('intervalMinutes').value, daily_times: $('dailyTimes').value.split(/[\s,]+/).filter(Boolean) },
