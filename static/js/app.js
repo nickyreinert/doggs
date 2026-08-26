@@ -499,7 +499,10 @@ function createRuleRow(rule) {
   const remove = document.createElement('button');
   remove.type = 'button'; remove.className = 'icon-button rule-remove'; remove.textContent = '✕'; remove.title = 'Remove rule'; remove.setAttribute('aria-label', 'Remove rule');
   remove.onclick = () => row.remove();
-  head.append(name, enabledLabel, up, down, remove);
+  const test = document.createElement('button');
+  test.type = 'button'; test.className = 'action rule-test'; test.textContent = 'Test';
+  test.onclick = () => testRule(row);
+  head.append(name, enabledLabel, up, down, test, remove);
 
   const grid = document.createElement('div');
   grid.className = 'rule-card-grid';
@@ -535,6 +538,10 @@ function createRuleRow(rule) {
   );
 
   row.append(head, grid);
+  const results = document.createElement('div');
+  results.className = 'rule-test-results';
+  results.hidden = true;
+  row.append(results);
   return row;
 }
 
@@ -550,7 +557,11 @@ function addRule() {
 }
 
 function collectRules() {
-  return [...$('ruleList').querySelectorAll('.rule-card')].map(row => ({
+  return [...$('ruleList').querySelectorAll('.rule-card')].map(ruleFromRow);
+}
+
+function ruleFromRow(row) {
+  return {
     id: row.dataset.ruleId || undefined,
     name: row.querySelector('.rule-name').value.trim(),
     enabled: row.querySelector('.rule-enabled input').checked,
@@ -562,7 +573,48 @@ function collectRules() {
     content_chars: Number(row.querySelector('.rule-content-chars').value) || 500,
     category: row.querySelector('.rule-category').value,
     tags: row.querySelector('.rule-tags').value.split(/[\s,]+/).map(value => value.trim()).filter(Boolean),
-  }));
+  };
+}
+
+async function testRule(row) {
+  const button = row.querySelector('.rule-test');
+  const results = row.querySelector('.rule-test-results');
+  button.disabled = true;
+  results.hidden = false;
+  results.innerHTML = '<div class="meta">Testing against indexed documents…</div>';
+  try {
+    const r = await fetch('/api/rules/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rule: ruleFromRow(row) }) });
+    const d = r.ok ? await r.json() : { matches: [], truncated: false };
+    results.innerHTML = '';
+    if (!d.matches.length) {
+      results.innerHTML = '<div class="meta">No matching documents yet.</div>';
+    } else {
+      const list = document.createElement('ul');
+      list.className = 'rule-test-list';
+      d.matches.forEach(match => {
+        const item = document.createElement('li');
+        const title = document.createElement('span');
+        title.className = 'rule-test-name';
+        title.textContent = [match.name, match.date, match.category].filter(Boolean).join(' · ');
+        const reason = document.createElement('span');
+        reason.className = 'rule-test-reason';
+        reason.textContent = match.reasons.join('; ');
+        item.append(title, reason);
+        list.append(item);
+      });
+      results.append(list);
+      if (d.truncated) {
+        const more = document.createElement('div');
+        more.className = 'meta';
+        more.textContent = 'Showing the first ' + d.matches.length + ' matches; more may exist.';
+        results.append(more);
+      }
+    }
+  } catch {
+    results.innerHTML = '<div class="meta">Could not test this rule.</div>';
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function populateGeneralSettings(general, locked) {

@@ -529,6 +529,34 @@ def match_rule(filename, suffix, text):
         if reasons: return rule, reasons
     return None, []
 
+def test_rule_matches(rule_payload, match_limit=50, scan_limit=500):
+    """Preview which already-archived documents an unsaved rule would match, and why."""
+    rule = normalize_rule(rule_payload)
+    conditions = rule.get("conditions", {})
+    rows = sorted((row for row in read_rows() if row.get("location") != "duplicates"), key=lambda row: row.get("date", ""), reverse=True)
+    matches, truncated = [], len(rows) > scan_limit
+    for row in rows[:scan_limit]:
+        path = file_path_for_row(row)
+        if not path.is_file(): continue
+        filename, suffix = path.name, path.suffix.lower().removeprefix(".")
+        if conditions.get("extension") and suffix != conditions["extension"]: continue
+        if conditions.get("name_contains") and conditions["name_contains"].lower() not in filename.lower(): continue
+        text = ""
+        if conditions.get("content_contains"):
+            try:
+                content, _, metadata, _ = document_content(path)
+                metadata_text = " ".join(metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if metadata.get(key))
+                text = f"{metadata_text} {content}".strip()
+            except Exception:
+                continue
+        reasons = rule_match_reasons(rule, filename, suffix, text)
+        if reasons:
+            matches.append({"id": row.get("id", ""), "name": filename, "date": row.get("date", ""), "category": row.get("category", ""), "reasons": reasons})
+        if len(matches) >= match_limit:
+            truncated = True
+            break
+    return matches, truncated
+
 def resolved_category(extracted, classification, categories):
     """Keep a valid LLM category, otherwise map reliable local classifications."""
     candidate = slugify(extracted.get("category"))
@@ -1198,6 +1226,13 @@ def settings():
             if isinstance(values, list): current["schedule"]["daily_times"] = sorted(set(value for value in values if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(value))))
         write_settings(current); STATUS_CACHE["payload"] = None
     return jsonify(read_settings())
+
+@app.post("/api/rules/test")
+def test_rule():
+    """Preview an unsaved rule's matches against the archive before it is written to settings."""
+    payload = request.get_json(silent=True) or {}
+    matches, truncated = test_rule_matches(payload.get("rule") or {})
+    return jsonify({"matches": matches, "truncated": truncated})
 
 @app.post("/api/tags/<tag>/ignore")
 def ignore_tag(tag):
