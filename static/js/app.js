@@ -433,7 +433,8 @@ function selectAdjacentFile(key) {
   }
   const f = files.find(x => x.id === cards[next].dataset.fileId);
   if (!f) return;
-  selectFile(f);
+  if (state.preview && f.duplicate_count) openDuplicates(f);
+  else selectFile(f);
   document.querySelector('#files .file.active')?.scrollIntoView({ block: 'nearest' });
 }
 
@@ -646,11 +647,15 @@ async function runOcr() {
 }
 
 // Duplicate cleanup: badge click loads every copy of the group into a grid preview.
+let duplicatesRequest = 0;
 async function openDuplicates(f) {
-  const r = await fetch('/api/file/' + encodeURIComponent(f.id) + '/duplicates');
-  if (!r.ok) return;
-  const d = await r.json();
+  const request = ++duplicatesRequest;
   state.selected = f;
+  markActiveFile();
+  const r = await fetch('/api/file/' + encodeURIComponent(f.id) + '/duplicates');
+  if (!r.ok || request !== duplicatesRequest || state.selected?.id !== f.id) return;
+  const d = await r.json();
+  if (request !== duplicatesRequest || state.selected?.id !== f.id) return;
   state.requestedDocument = '';
   if (!state.preview) setPreview(true, false);
   syncUrl(true);
