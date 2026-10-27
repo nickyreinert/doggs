@@ -696,13 +696,26 @@ async function removeDuplicate(id, list) {
   if (!confirm('Remove this document permanently?')) return;
   const r = await fetch('/api/file/' + encodeURIComponent(id), { method: 'DELETE' });
   if (!r.ok) { alert('Could not remove this document.'); return }
-  await refresh();
   const sibling = list.find(f => f.id !== id);
-  if (!sibling) { closeDuplicates(false); return }
-  const check = await fetch('/api/file/' + encodeURIComponent(sibling.id) + '/duplicates');
-  const d = check.ok ? await check.json() : { documents: [] };
-  if ((d.documents || []).length > 1) renderDuplicatesGrid(d.documents);
-  else closeDuplicates(false);
+  const check = sibling ? await fetch('/api/file/' + encodeURIComponent(sibling.id) + '/duplicates') : null;
+  const remaining = check?.ok ? (await check.json()).documents || [] : [];
+  if (remaining.length > 1) {
+    // The group still has copies: keep reviewing it (the original may have changed after a promotion).
+    state.selected = remaining.find(f => !f.is_duplicate) || remaining[0];
+    await refresh();
+    renderDuplicatesGrid(remaining);
+    return;
+  }
+  // Group resolved: in the duplicates filter jump to the next group, otherwise show the surviving copy.
+  closeDuplicates(false);
+  state.selected = state.duplicates ? null : remaining[0] || null;
+  state.requestedDocument = state.selected ? state.selected.id : '';
+  await refresh();
+  if (state.duplicates) {
+    const next = [...document.querySelectorAll('#files .file')].map(el => files.find(x => x.id === el.dataset.fileId)).find(f => f && f.duplicate_count);
+    if (next) await openDuplicates(next);
+  }
+  if (!state.selected && !$('duplicatesView').classList.contains('open')) clearSelection(true);
 }
 
 async function refreshStatus() {
