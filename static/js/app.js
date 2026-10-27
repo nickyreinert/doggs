@@ -44,7 +44,8 @@ function setPreview(open, updateUrl = true) {
 function loadFrame() {
   const f = state.selected;
   if (!state.preview || !f || $('duplicatesView').classList.contains('open')) return;
-  if ($('frame').getAttribute('src') !== f.url) $('frame').src = f.url;
+  const src = f.preview_url || f.url;
+  if ($('frame').getAttribute('src') !== src) $('frame').src = src;
 }
 
 function syncUrl(push = false) {
@@ -677,7 +678,7 @@ function renderDuplicatesGrid(list) {
     remove.onclick = () => removeDuplicate(f.id, list);
     const frame = document.createElement('iframe');
     frame.title = f.name;
-    frame.src = f.url;
+    frame.src = f.preview_url || f.url;
     const name = document.createElement('div');
     name.className = 'dupe-name';
     name.textContent = f.name + (f.is_duplicate ? '' : ' (original)');
@@ -1037,7 +1038,7 @@ $('resetFilters').onclick = () => {
   refresh();
 };
 $('cleanDuplicatesButton').onclick = async () => {
-  if (!confirm('Remove every duplicate copy and keep only one original of each document? This cannot be undone.')) return;
+  if (!confirm('Remove every duplicate copy and keep only one original of each document? Copies are moved to the trash folder.')) return;
   const r = await fetch('/api/duplicates/clean', { method: 'POST' });
   if (!r.ok) { alert('Could not clean duplicates.'); return }
   await refresh();

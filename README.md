@@ -188,9 +188,18 @@ DOGGS defaults to `qwen2.5:3b`, a small model for local metadata extraction. Oll
 
 ## Supported file formats
 
-DOGGS archives PDFs, scanned images (read with OCR), plain text files, CSV files, and modern Microsoft Office files: `.docx`, `.xlsx`, and `.pptx`. Their original file format is retained in the archive. For non-PDF documents, DOGGS reads the first 80 non-empty lines (configurable through `LLM_SOURCE_LINES`), where sender, subject, and letterhead usually are, and sends at most `LLM_INPUT_CHARS` of it to the local LLM; it does not run OCR. Images always go through OCR. Legacy `.doc`/`.xls`/`.ppt` files are not supported; they stay in the incoming folder and are listed in the pipeline panel.
+DOGGS archives these formats and keeps the original file in the archive:
 
-Older binary Office formats such as `.doc`, `.xls`, and `.ppt`, plus all other unsupported file types, remain untouched in the incoming folder.
+- **PDF** and **XPS/OXPS**
+- **Images** (`.jpg`, `.png`, `.tiff`, `.webp`, `.heic`/`.heif`, …), read with OCR
+- **Microsoft Office**, modern and legacy: `.docx`/`.docm`/`.dotx`, `.xlsx`/`.xlsm`, `.pptx`/`.pptm`, and the old binary `.doc`, `.xls`, `.ppt`, `.pps`, `.dot`, `.xlt`, `.pot`. Legacy files are read in pure Python; no LibreOffice is needed. A `.doc` that is really RTF or HTML is detected by its content.
+- **OpenDocument**: `.odt`, `.ods`, `.odp`, `.odg` and their templates
+- **Apple iWork**: `.pages`, `.numbers`, `.key`. Text comes from the `.iwa` archives or the embedded QuickLook PDF, and the embedded preview image is used for thumbnails. iWork *package folders* (a `.pages` directory, as copied by some sync tools) are zipped into the equivalent single-file document before import; empty package folders are reported and left alone.
+- **Mail and text**: `.eml`, `.msg` (Outlook), `.rtf`, `.txt`, `.md`, `.csv`, `.json`, `.xml`, `.html`, `.vcf`, `.ics`
+
+For non-PDF documents, DOGGS reads the first 80 non-empty lines (configurable through `LLM_SOURCE_LINES`), where sender, subject, and letterhead usually are, and sends at most `LLM_INPUT_CHARS` of it to the local LLM; it does not run OCR. Images, and iWork files without extractable text, go through OCR. Formats the browser cannot display open as a text preview with a page image (where available) and a download link.
+
+Unsupported file types remain untouched in the incoming folder and are listed in the pipeline panel.
 
 The **Categories** Settings tab manages the allowed high-level categories. In **fast** mode (Settings → General → Category classification) a built-in classifier assigns one of these in milliseconds and the LLM runs only when you click **Re-extract**; in **LLM** mode the model picks the category for every new document. Categories you set by hand are never overwritten by re-scans and train the fast classifier; categories without built-in German keywords are matched by their own name; the default categories include financial documents, invoices, incoming and outgoing documents, banking, tax office, insurance, contracts, personal documents, and miscellaneous.
 

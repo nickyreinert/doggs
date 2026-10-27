@@ -27,7 +27,15 @@ from dateutil import parser as dateparser
 from docx import Document
 
 from classifier import FastClassifier
-from flask import Flask, abort, jsonify, render_template, request, send_file
+import formats
+
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    HEIF_FORMATS = {".heic", ".heif"}
+except ImportError:
+    HEIF_FORMATS = set()
+from flask import Flask, abort, jsonify, redirect, render_template, request, send_file
 from openpyxl import load_workbook
 from odf import teletype
 from odf.opendocument import load as load_odf
@@ -71,13 +79,23 @@ LLM_INPUT_CHARS = int(os.getenv("LLM_INPUT_CHARS", "1500"))
 FAST_MIN_CONFIDENCE = float(os.getenv("FAST_MIN_CONFIDENCE", "0.6"))
 DATE_DAYFIRST = os.getenv("DATE_DAYFIRST", "1") == "1"
 MAX_TOKEN_FACETS = int(os.getenv("MAX_TOKEN_FACETS", "80"))
+PLAIN_TEXT_FORMATS = {".txt", ".md", ".log", ".ini", ".yaml", ".yml", ".tex", ".vcf", ".ics"}
+ODF_FORMATS = {".odt", ".ods", ".odp", ".odg", ".ott", ".ots", ".otp"}
+# Office Open XML variants python-docx/openpyxl/python-pptx refuse (macro-enabled, templates, shows).
+OOXML_VARIANTS = {".docm", ".dotx", ".dotm", ".xlsm", ".xltx", ".xltm", ".pptm", ".potx", ".potm", ".ppsx", ".ppsm"}
+LEGACY_OFFICE_FORMATS = {".doc": formats.doc_text, ".dot": formats.doc_text, ".xls": formats.xls_text, ".xlt": formats.xls_text,
+                         ".ppt": formats.ppt_text, ".pps": formats.ppt_text, ".pot": formats.ppt_text}
+IWORK_FORMATS = {".pages", ".key", ".numbers"}
 TEXT_FORMATS = {
-    ".csv", ".epub", ".htm", ".html", ".ini", ".json", ".log", ".md", ".odp", ".ods", ".odt",
-    ".pptx", ".rtf", ".tex", ".tsv", ".txt", ".xml", ".yaml", ".yml", ".docx", ".xlsx",
+    ".csv", ".epub", ".htm", ".html", ".json", ".pptx", ".rtf", ".tsv", ".xml", ".docx", ".xlsx",
+    ".msg", ".eml", ".xps", ".oxps", *PLAIN_TEXT_FORMATS, *ODF_FORMATS, *OOXML_VARIANTS, *LEGACY_OFFICE_FORMATS, *IWORK_FORMATS,
 }
 # Scanned pages and photos: read with OCR instead of a text layer.
-IMAGE_FORMATS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gif"}
+IMAGE_FORMATS = {".png", ".jpg", ".jpeg", ".jfif", ".tif", ".tiff", ".bmp", ".webp", ".gif", *HEIF_FORMATS}
 SUPPORTED_FORMATS = {".pdf", *TEXT_FORMATS, *IMAGE_FORMATS}
+# Formats every browser displays inline; everything else gets a generated preview page instead of a download.
+BROWSER_VIEWABLE = {".pdf", ".png", ".jpg", ".jpeg", ".jfif", ".gif", ".webp", ".bmp", ".txt", ".json", ".xml"}
+THUMBNAIL_FORMATS = {".pdf", ".xps", ".oxps", *IMAGE_FORMATS, *IWORK_FORMATS}
 LLM_SOURCE_LINES = int(os.getenv("LLM_SOURCE_LINES", "80"))
 DEFAULT_CATEGORIES = ["financial-document", "invoice", "incoming", "outgoing", "banking", "tax-office", "insurance", "contract", "personal", "misc"]
 FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "category", "category_source", "rule_name", "rule_reason", "summary", "tokens", "removed_tags", "tags", "ocr_text", "is_duplicate", "duplicate_of", "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer", "source", "created_at"]
@@ -427,17 +445,40 @@ def image_pages(path, limit):
 def ocr_image_text(path, limit):
     return "\n".join(pytesseract.image_to_string(frame, lang=OCR_LANG) for frame in image_pages(path, limit))
 
-def extract_text_document(path):
-    """Extract readable text from supported non-PDF formats without altering their bytes."""
+def read_text_file(path):
+    raw = path.read_bytes()
+    try: return raw.decode("utf-8-sig")
+    except UnicodeDecodeError: return raw.decode("cp1252", errors="replace")
+
+def read_document_text(path):
+    """Full readable text of a supported non-PDF document; never alters the file."""
     suffix = path.suffix.lower()
     if suffix in IMAGE_FORMATS:
-        text = ocr_image_text(path, HEAD_PAGES)
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        return "\n".join(lines[:LLM_SOURCE_LINES])[:MAX_FULL_TEXT_CHARS], "ocr"
-    if suffix in {".txt", ".md", ".log", ".ini", ".yaml", ".yml", ".tex", ".rtf"}:
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if suffix == ".rtf":
-            text = re.sub(r"\\'[0-9a-fA-F]{2}|\\[a-z]+-?\d* ?|[{}]", "", text)
+        return ocr_image_text(path, HEAD_PAGES), "ocr"
+    if suffix in LEGACY_OFFICE_FORMATS or suffix in {".msg"}:
+        # Old "Word" files are often RTF, HTML, or renamed DOCX; trust the content, not the extension.
+        kind = formats.sniff(path)
+        if kind == "ole": text = formats.msg_text(path) if suffix == ".msg" else LEGACY_OFFICE_FORMATS[suffix](path)
+        elif kind == "zip": text = formats.ooxml_text(path)
+        elif kind == "rtf": text = formats.rtf_text(read_text_file(path))
+        elif kind == "html": text = formats.strip_markup(read_text_file(path))
+        else: text = read_text_file(path)
+    elif suffix in IWORK_FORMATS:
+        text = formats.iwork_text(path)
+        if not text.strip() and (preview := formats.iwork_preview_image(path)):
+            text = pytesseract.image_to_string(Image.open(BytesIO(preview)).convert("RGB"), lang=OCR_LANG)
+            return text, "ocr"
+    elif suffix in OOXML_VARIANTS:
+        text = formats.ooxml_text(path)
+    elif suffix == ".eml":
+        text = formats.eml_text(path)
+    elif suffix in {".xps", ".oxps"}:
+        with fitz.open(path) as document:
+            text = "\n".join(document.load_page(index).get_text("text") for index in range(min(len(document), HEAD_PAGES)))
+    elif suffix in PLAIN_TEXT_FORMATS:
+        text = read_text_file(path)
+    elif suffix == ".rtf":
+        text = formats.rtf_text(read_text_file(path))
     elif suffix in {".csv", ".tsv"}:
         with path.open(newline="", encoding="utf-8-sig", errors="replace") as file:
             dialect = csv.excel_tab if suffix == ".tsv" else csv.excel
@@ -451,7 +492,7 @@ def extract_text_document(path):
         raw = path.read_text(encoding="utf-8", errors="replace")
         text = re.sub(r"<[^>]+>", " ", raw) if suffix in {".html", ".htm"} else raw
         text = html.unescape(text)
-    elif suffix in {".odt", ".ods", ".odp"}:
+    elif suffix in ODF_FORMATS:
         document = load_odf(path)
         text = "\n".join(teletype.extractText(element) for element in (*document.getElementsByType(H), *document.getElementsByType(P)))
     elif suffix == ".docx":
@@ -482,8 +523,13 @@ def extract_text_document(path):
             )
     else:
         raise ValueError(f"Unsupported document format: {suffix}")
+    return text, f"{suffix.removeprefix('.')}-text"
+
+def extract_text_document(path):
+    """The first lines of a non-PDF document, where sender, subject, and letterhead usually are."""
+    text, source = read_document_text(path)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return "\n".join(lines[:LLM_SOURCE_LINES])[:MAX_FULL_TEXT_CHARS], f"{suffix.removeprefix('.')}-text"
+    return "\n".join(lines[:LLM_SOURCE_LINES])[:MAX_FULL_TEXT_CHARS], source
 
 def document_content(path):
     if path.suffix.lower() == ".pdf":
@@ -954,23 +1000,67 @@ def reconcile_archive_locations():
         write_rows(rows)
     return changed
 
+def pack_iwork_bundle(directory):
+    """Replace a macOS iWork package folder with the equivalent single-file (zip) document Pages/Keynote/Numbers open."""
+    files = [item for item in directory.rglob("*") if item.is_file()]
+    if not any(item.relative_to(directory).parts[0] in {"Index", "index.xml", "index.xml.gz", "index.apxl", "index.apxl.gz"} for item in files):
+        return None
+    temp_path = directory.with_name(f".{directory.name}.{secrets.token_hex(4)}.packing")
+    with zipfile.ZipFile(temp_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for item in files: archive.write(item, item.relative_to(directory).as_posix())
+    with zipfile.ZipFile(temp_path) as archive:
+        if archive.testzip() is not None or len(archive.namelist()) != len(files): temp_path.unlink(); raise OSError(f"Could not pack {directory}")
+    shutil.rmtree(directory); temp_path.rename(directory)
+    log.info("Packed iWork package folder into a single file: %s", directory)
+    return directory
+
+def incoming_files(pack=True):
+    """(files, unsupported names) in the inbox. iWork package folders count as one document and are never descended into;
+    with `pack` they are converted to single files so the pipeline can archive them."""
+    files, unsupported = [], []
+    if not INCOMING_DIR.is_dir(): return files, unsupported
+    managed = [directory.resolve() for directory in (ARCHIVE_DIR, ERROR_DIR, DUPLICATE_DIR, TRASH_DIR)]
+    for root, directories, names in os.walk(INCOMING_DIR):
+        root_path = Path(root)
+        kept = []
+        for name in directories:
+            path = root_path / name
+            if name.startswith(".") or any(is_within(directory, path) for directory in managed): continue
+            if path.suffix.lower() in IWORK_FORMATS:
+                if not pack:
+                    (files if any(path.iterdir()) else unsupported).append(path if any(path.iterdir()) else f"{name} (empty iWork package folder)")
+                    continue
+                try: packed = pack_iwork_bundle(path)
+                except OSError as exc: log.warning("Could not pack iWork package %s: %s", path, exc); packed = None
+                if packed: files.append(packed)
+                else: unsupported.append(f"{name} (empty iWork package folder)")
+                continue
+            kept.append(name)
+        directories[:] = kept if RECURSIVE_SCAN else []
+        for name in names:
+            if name.startswith(".") or name.startswith("~$"): continue
+            path = root_path / name
+            (files if path.suffix.lower() in SUPPORTED_FORMATS else unsupported).append(path if path.suffix.lower() in SUPPORTED_FORMATS else name)
+    return files, sorted(unsupported)
+
+def safe_mtime(path):
+    try: return path.stat().st_mtime
+    except OSError: return 0
+
 def scan_incoming():
     if not SCAN_LOCK.acquire(blocking=False):
         return
     try:
         reconcile_archive_locations()
-        managed_dirs = (ARCHIVE_DIR, ERROR_DIR, DUPLICATE_DIR, TRASH_DIR)
-        source_paths = INCOMING_DIR.rglob("*") if RECURSIVE_SCAN else INCOMING_DIR.iterdir()
-        incoming = [p for p in source_paths if p.is_file() and not p.name.startswith(".") and not any(is_within(directory, p) for directory in managed_dirs)]
-        candidates = sorted((p for p in incoming if p.suffix.lower() in SUPPORTED_FORMATS), key=lambda p: p.stat().st_mtime)
+        incoming, skipped = incoming_files()
+        candidates = sorted(incoming, key=safe_mtime)
         # Files of other types are left in place; surface them so they don't look like they were silently lost.
-        skipped = sorted(p.name for p in incoming if p.suffix.lower() not in SUPPORTED_FORMATS)
         if skipped: log.warning("Skipping %d unsupported file(s) in the incoming folder: %s", len(skipped), ", ".join(skipped[:10]))
         PIPELINE_STATE["unsupported"] = skipped
         for path in candidates:
             if PIPELINE_STATE["paused"]:
                 break
-            if not is_stable(path):
+            if not path.is_file() or not is_stable(path):
                 continue
             PIPELINE_STATE["processing"] = path.name
             try:
@@ -1042,8 +1132,10 @@ def duplicate_counts_by_original(rows):
 def serialize_row(row, duplicate_counts=None):
     duplicate_count = (duplicate_counts or {}).get(duplicate_group_id(row), 0)
     document_type = Path(row.get("stored_path", row.get("original_name", ""))).suffix.lower().removeprefix(".") or "unknown"
-    thumb_url = f"/thumb?id={quote(row.get('id', ''))}&v={quote(row.get('file_hash', '')[:16])}" if document_type == "pdf" or f".{document_type}" in IMAGE_FORMATS else ""
-    return {**row, "name": Path(row.get("stored_path", "")).name, "type": document_type, "document_tags": document_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "thumb_url": thumb_url, "duplicate_count": duplicate_count, "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "ocr_scan": OCR_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})}
+    row_id = quote(row.get('id', ''))
+    thumb_url = f"/thumb?id={row_id}&v={quote(row.get('file_hash', '')[:16])}" if f".{document_type}" in THUMBNAIL_FORMATS else ""
+    preview_url = f"/file?id={row_id}" if f".{document_type}" in BROWSER_VIEWABLE else f"/preview?id={row_id}"
+    return {**row, "name": Path(row.get("stored_path", "")).name, "type": document_type, "document_tags": document_tags(row), "url": f"/file?id={row_id}", "preview_url": preview_url, "thumb_url": thumb_url, "duplicate_count": duplicate_count, "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "ocr_scan": OCR_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})}
 
 def demo_document_rows():
     """Return screenshot-friendly sample records without writing to the real archive."""
@@ -1342,11 +1434,10 @@ def api_status():
     except Exception:
         ocr_languages = []
     waiting = []
-    if INCOMING_DIR.exists():
-        source_paths = INCOMING_DIR.rglob("*") if RECURSIVE_SCAN else INCOMING_DIR.iterdir()
-        for path in sorted(source_paths, key=lambda item: item.stat().st_mtime):
-            if path.is_file() and path.suffix.lower() in SUPPORTED_FORMATS:
-                waiting.append({"name": path.name, "size": path.stat().st_size, "state": "processing" if path.name == PIPELINE_STATE["processing"] else "waiting"})
+    for path in sorted(incoming_files(pack=False)[0], key=safe_mtime):
+        try: size = path.stat().st_size
+        except OSError: continue  # Moved by the pipeline while listing.
+        waiting.append({"name": path.name, "size": size, "state": "processing" if path.name == PIPELINE_STATE["processing"] else "waiting"})
     payload = {
         "ollama_enabled": AI_MODE == "ollama",
         "ollama_connected": connected,
@@ -1472,16 +1563,46 @@ def serve_file():
     if not full_path.is_file(): abort(404)
     return send_file(full_path, mimetype=mimetypes.guess_type(full_path.name)[0])
 
-def render_thumbnail(open_document):
+PREVIEW_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="color-scheme" content="light dark">
+<title>{title}</title><style>
+body{{margin:0;font:14px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;background:Canvas;color:CanvasText}}
+header{{position:sticky;top:0;padding:10px 18px;background:color-mix(in srgb,Canvas 92%,CanvasText);border-bottom:1px solid color-mix(in srgb,Canvas 80%,CanvasText);font-size:12px;opacity:.95}}
+header a{{color:inherit;font-weight:600}} main{{padding:18px;max-width:900px;margin:auto}}
+img{{display:block;max-width:100%;margin:0 auto 18px;box-shadow:0 1px 6px #0003}}
+pre{{white-space:pre-wrap;word-wrap:break-word;font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;margin:0}}
+.empty{{opacity:.7;font-style:italic}}</style></head><body>
+<header>Text preview of <b>{title}</b> &middot; this format cannot be shown by the browser. <a href="{url}" download>Download original</a></header>
+<main>{image}{body}</main></body></html>"""
+
+@app.route("/preview")
+def serve_preview():
+    """Inline preview for formats browsers cannot display: embedded preview image (if any) plus the extracted text."""
+    row = next((item for item in read_rows() if item.get("id") == request.args.get("id", "")), None)
+    if not row: abort(404)
+    full_path = file_path_for_row(row); base = DUPLICATE_DIR if row.get("location") == "duplicates" else ARCHIVE_DIR
+    if not is_within(base, full_path): abort(403)
+    if not full_path.is_file(): abort(404)
+    suffix, row_id = full_path.suffix.lower(), quote(row.get("id", ""))
+    if suffix in BROWSER_VIEWABLE: return redirect(f"/file?id={row_id}")
+    image = f'<img alt="" src="/thumb?id={row_id}&size=large">' if suffix in THUMBNAIL_FORMATS else ""
+    text = ""
+    if suffix not in IMAGE_FORMATS:
+        try: text = read_document_text(full_path)[0] if suffix != ".pdf" else ""
+        except Exception: log.warning("Could not read text for preview of %s", full_path)
+        text = re.sub(r"\n{3,}", "\n\n", text.strip())[:200_000]
+    body = f"<pre>{html.escape(text)}</pre>" if text else ("" if image else '<p class="empty">No readable text found in this document.</p>')
+    return PREVIEW_PAGE.format(title=html.escape(full_path.name), url=f"/file?id={row_id}", image=image, body=body)
+
+def render_thumbnail(open_document, width=THUMB_WIDTH):
     with open_document() as doc:
         if not len(doc): return None
-        page = doc.load_page(0); zoom = THUMB_WIDTH / max(page.rect.width, 1)
+        page = doc.load_page(0); zoom = width / max(page.rect.width, 1)
         pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
     buffer = BytesIO(); Image.frombytes("RGB", [pix.width, pix.height], pix.samples).save(buffer, "JPEG", quality=72, optimize=True)
     return buffer.getvalue()
 
-def render_image_thumbnail(path):
-    frame = next(image_pages(path, 1)); frame.thumbnail((THUMB_WIDTH, THUMB_WIDTH * 2))
+def render_image_thumbnail(path, width=THUMB_WIDTH):
+    frame = next(image_pages(path, 1)); frame.thumbnail((width, width * 2))
     buffer = BytesIO(); frame.save(buffer, "JPEG", quality=72, optimize=True)
     return buffer.getvalue()
 
@@ -1496,11 +1617,18 @@ def serve_thumbnail():
     if not row: abort(404)
     full_path = file_path_for_row(row); base = DUPLICATE_DIR if row.get("location") == "duplicates" else ARCHIVE_DIR
     if not is_within(base, full_path): abort(403)
-    if not full_path.is_file() or full_path.suffix.lower() not in {".pdf", *IMAGE_FORMATS}: abort(404)
+    suffix = full_path.suffix.lower()
+    if not full_path.is_file() or suffix not in THUMBNAIL_FORMATS: abort(404)
+    width = 1400 if request.args.get("size") == "large" else THUMB_WIDTH
     cache_key = re.sub(r"[^0-9a-f]", "", row.get("file_hash", "").lower()) or hashlib.sha256(str(full_path).encode()).hexdigest()
-    cache_path = THUMB_DIR / f"{cache_key}-{THUMB_WIDTH}.jpg"
+    cache_path = THUMB_DIR / f"{cache_key}-{width}.jpg"
     if not cache_path.is_file():
-        try: data = render_image_thumbnail(full_path) if full_path.suffix.lower() in IMAGE_FORMATS else render_thumbnail(lambda: fitz.open(full_path))
+        try:
+            if suffix in IWORK_FORMATS:
+                preview = formats.iwork_preview_image(full_path)
+                data = render_image_thumbnail(BytesIO(preview), width) if preview else None
+            elif suffix in IMAGE_FORMATS: data = render_image_thumbnail(full_path, width)
+            else: data = render_thumbnail(lambda: fitz.open(full_path), width)
         except Exception:
             log.warning("Could not render thumbnail for %s", full_path); abort(404)
         if not data: abort(404)
