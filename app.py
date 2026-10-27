@@ -883,9 +883,47 @@ def promote_orphaned_duplicates(rows):
         log.info("Promoted duplicate %s to original (previous original %s no longer indexed)", destination, old_original_id)
     return changed
 
+DUPLICATE_HASH_CACHE = {}
+
+def relink_missing_duplicates(rows):
+    """Point duplicate rows whose file was renamed or moved inside DUPLICATE_DIR at the file with the same hash."""
+    missing = [row for row in rows if row.get("location") == "duplicates" and not file_path_for_row(row).is_file()]
+    if not missing or not DUPLICATE_DIR.is_dir(): return False
+    claimed = {row.get("stored_path") for row in rows if row.get("location") == "duplicates"}
+    by_hash, share_has_files = {}, False
+    for path in sorted(DUPLICATE_DIR.iterdir()):
+        if not path.is_file(): continue
+        share_has_files = True
+        if path.name in claimed: continue
+        stat = path.stat(); key = (path.name, stat.st_size, stat.st_mtime_ns)
+        if key not in DUPLICATE_HASH_CACHE:
+            try: DUPLICATE_HASH_CACHE[key] = sha256_file(path)
+            except OSError: continue
+        by_hash.setdefault(DUPLICATE_HASH_CACHE[key], []).append(path)
+    changed, dead = False, set()
+    originals = {row.get("id"): row for row in rows if row.get("location") != "duplicates"}
+    for row in missing:
+        candidates = by_hash.get(row.get("file_hash"))
+        if candidates:
+            path = candidates.pop(0)
+            log.info("Relinked duplicate %s: %s -> %s", row.get("id"), row.get("stored_path"), path.name)
+            row["stored_path"] = path.name; changed = True
+            continue
+        original = originals.get(row.get("duplicate_of"))
+        # Only forget the copy when its identical original is verifiably present, so an unmounted share never drops rows.
+        if original and original.get("file_hash") == row.get("file_hash") and file_path_for_row(original).is_file() and share_has_files:
+            log.info("Removed index entry of vanished duplicate %s (%s); original %s remains", row.get("id"), row.get("stored_path"), original.get("stored_path"))
+            dead.add(id(row))
+        else:
+            log.warning("Duplicate file is missing: %s", file_path_for_row(row))
+    if dead:
+        rows[:] = [row for row in rows if id(row) not in dead]; changed = True
+    return changed
+
 def reconcile_archive_locations():
     """Move indexed documents into the year directory recorded in the index."""
-    rows = read_rows(); changed = promote_orphaned_duplicates(rows)
+    rows = read_rows(); changed = relink_missing_duplicates(rows)
+    changed = promote_orphaned_duplicates(rows) or changed
     for row in rows:
         if row.get("location") == "duplicates":
             continue
