@@ -78,7 +78,7 @@ if [[ ! -f "$BASE_DIR/.env" ]]; then
     printf 'INCOMING_DIR=%s\nARCHIVE_DIR=%s\nDATA_DIR=%s\n' "$DEFAULT_INCOMING" "$DEFAULT_ARCHIVE" "$DEFAULT_DATA"
     printf 'CSV_PATH=%s/index.csv\nERROR_DIR=%s/errors\nDUPLICATE_DIR=%s/duplicates\n' "$DEFAULT_DATA" "${DEFAULT_DATA%/data}" "${DEFAULT_DATA%/data}"
     printf 'HOST=0.0.0.0\nPORT=8383\nPOLL_SECONDS=300\nRECURSIVE_SCAN=0\nOCR_LANG=eng\nOCR_DPI=200\n'
-    printf 'AI_MODE=%s\nOLLAMA_URL=http://127.0.0.1:11434\nAI_MODEL=qwen2.5:3b\nAI_TIMEOUT=60\nMAX_TEXT_CHARS=300\n' "$AI_MODE"
+    printf 'AI_MODE=%s\nOLLAMA_URL=http://127.0.0.1:11434\nAI_MODEL=qwen2.5:1.5b\nAI_TIMEOUT=60\nMAX_TEXT_CHARS=300\n' "$AI_MODE"
   } > "$BASE_DIR/.env"
 else
   info "Keeping existing $BASE_DIR/.env."

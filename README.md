@@ -141,10 +141,13 @@ Restart DOGGS after changing `.env`. Relative local paths are resolved from the 
 | `RECURSIVE_SCAN` | Scan inbox subfolders (`0` or `1`) | `0` |
 | `OCR_LANG` | Tesseract language code | `eng` |
 | `AI_MODE` | `ollama` or `heuristic` | `ollama` |
-| `AI_MODEL` | Local metadata model | `qwen2.5:3b` |
+| `AI_MODEL` | Local metadata model | `qwen2.5:1.5b` |
 | `CLASSIFIER` | `fast` (built-in classifier; LLM only on request) or `llm` (LLM for every new document) | `fast` |
 | `LLM_INPUT_CHARS` | Maximum characters of a text document sent to the LLM | `1500` |
 | `FAST_MIN_CONFIDENCE` | Minimum confidence before the fast classifier assigns a category | `0.6` |
+| `EMBED_MODEL` | Ollama embedding model for semantic search (empty disables embeddings; keyword search still works) | `jina/jina-embeddings-v2-base-de` |
+| `SEARCH_DB_PATH` | Local search index (a rebuildable cache; keep it out of synced folders) | `./cache/search.sqlite` |
+| `SEARCH_OCR_PAGES` | Pages OCR'd for the search index when a PDF has no text layer | `3` |
 | `EXTERNAL_API_TOKEN` | Bearer token required by the external archive API | unset (API disabled) |
 
 The footer reports Ollama connectivity, selected-model availability, and OCR-language readiness.
@@ -184,9 +187,48 @@ curl -H "Authorization: Bearer $EXTERNAL_API_TOKEN" \
 
 The response includes document metadata, summary, tags, category, and an `smb_url` such as `smb://nas.local/documents/2026/2026-08-23_policy.pdf`.
 
+### Full-text and semantic search
+
+DOGGS keeps a search index of the complete text of every archived document: SQLite FTS5 for keywords plus vector embeddings for meaning. The embeddings come from `jina/jina-embeddings-v2-base-de`, a small German/English model of about 0.4 GB RAM. The index lives in `SEARCH_DB_PATH`, builds itself in the background at low CPU priority, and follows every archive change within a minute. Scans without a text layer are OCR'd for the first `SEARCH_OCR_PAGES` pages. Pull the model once:
+
+```bash
+ollama pull jina/jina-embeddings-v2-base-de
+```
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/external/v1/search` | Searches document contents. `q`, optional `mode` (`hybrid` default, `keyword`, `semantic`), `years`, `categories`, `tags`, `limit`. Results include `score`, `similarity`, and the best matching `snippets`. |
+| `GET /api/external/v1/documents/<id>/text` | Extracted plain text of one document, paginated with `offset` and `limit` (characters); follow `next_offset`. |
+| `GET /api/external/v1/search/status` | Index progress: documents indexed, embedded chunks, pending work. |
+
+### MCP server (Claude and other LLM clients)
+
+The same token also enables a [Model Context Protocol](https://modelcontextprotocol.io) server at `/api/external/v1/mcp`, using the Streamable HTTP transport. It offers the read-only tools `search_documents`, `list_documents`, `get_document`, `get_document_text`, and `list_catalog`.
+
+Claude Code:
+
+```bash
+claude mcp add --transport http doggs http://192.168.178.150:8383/api/external/v1/mcp \
+    --header "Authorization: Bearer $DOGGS_TOKEN"
+```
+
+Claude Desktop launches local servers only, so copy [`mcp_stdio.py`](mcp_stdio.py) (standard library only) to that computer and add it to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "doggs": {
+      "command": "python3",
+      "args": ["/path/to/mcp_stdio.py"],
+      "env": { "DOGGS_URL": "http://192.168.178.150:8383", "DOGGS_TOKEN": "<EXTERNAL_API_TOKEN>" }
+    }
+  }
+}
+```
+
 ## Local AI with Ollama
 
-DOGGS defaults to `qwen2.5:3b`, a small model for local metadata extraction. Ollama is optional: documents still archive using deterministic heuristics when it is unavailable.
+DOGGS defaults to `qwen2.5:1.5b`, a small model for local metadata extraction. Ollama is optional: documents still archive using deterministic heuristics when it is unavailable.
 
 ## Supported file formats
 
@@ -205,12 +247,12 @@ Unsupported file types remain untouched in the incoming folder and are listed in
 
 The **Categories** Settings tab manages the allowed high-level categories. In **fast** mode (Settings → General → Category classification) a built-in classifier assigns one of these in milliseconds and the LLM runs only when you click **Re-extract**; in **LLM** mode the model picks the category for every new document. Categories you set by hand are never overwritten by re-scans and train the fast classifier; categories without built-in German keywords are matched by their own name; the default categories include financial documents, invoices, incoming and outgoing documents, banking, tax office, insurance, contracts, personal documents, and miscellaneous.
 
-When local AI is enabled during installation, `install.sh` installs Ollama automatically when it is missing and pulls the selected model (default: `qwen2.5:3b`).
+When local AI is enabled during installation, `install.sh` installs Ollama automatically when it is missing and pulls the selected model (default: `qwen2.5:1.5b`).
 
 Install Ollama from [ollama.com](https://ollama.com/download), then pull the model:
 
 ```bash
-ollama pull qwen2.5:3b
+ollama pull qwen2.5:1.5b
 ```
 
 To disable local-model calls altogether:
@@ -243,7 +285,7 @@ Re-run `./install.sh` and keep `deu` selected. macOS installs `tesseract-lang`; 
 
 ### Ollama or the model is unavailable
 
-Processing continues with heuristics. Start Ollama and run `ollama pull qwen2.5:3b` to enable AI metadata later.
+Processing continues with heuristics. Start Ollama and run `ollama pull qwen2.5:1.5b` to enable AI metadata later.
 
 ### System service cannot start
 

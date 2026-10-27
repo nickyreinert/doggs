@@ -29,6 +29,7 @@ from docx import Document
 
 from classifier import FastClassifier
 import formats
+from search import SearchIndex
 
 try:
     from pillow_heif import register_heif_opener
@@ -73,7 +74,11 @@ TOP_REGION_FRACTION, HEAD_PAGES = float(os.getenv("TOP_REGION_FRACTION", "0.25")
 OCR_TRIGGER_CHARS, MAX_SOURCE_CHARS = int(os.getenv("OCR_TRIGGER_CHARS", "80")), int(os.getenv("MAX_SOURCE_CHARS", "3000"))
 MAX_TEXT_CHARS, MAX_FULL_TEXT_CHARS, AI_TIMEOUT = int(os.getenv("MAX_TEXT_CHARS", "300")), int(os.getenv("MAX_FULL_TEXT_CHARS", "12000")), int(os.getenv("AI_TIMEOUT", "60"))
 AI_MODE, OLLAMA_URL = os.getenv("AI_MODE", "ollama"), os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
-AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:3b")
+AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b")
+# Full-text + semantic search index for the external API / MCP server (a local, rebuildable cache).
+SEARCH_DB_PATH = configured_path("SEARCH_DB_PATH", BASE_DIR / "cache" / "search.sqlite")
+EMBED_MODEL = os.getenv("EMBED_MODEL", "jina/jina-embeddings-v2-base-de").strip()
+SEARCH_OCR_PAGES, SEARCH_MAX_PAGES, SEARCH_MAX_CHARS = int(os.getenv("SEARCH_OCR_PAGES", "3")), int(os.getenv("SEARCH_MAX_PAGES", "60")), int(os.getenv("SEARCH_MAX_CHARS", "200000"))
 # "fast" categorizes new documents locally and runs the LLM only on request; "llm" asks the LLM for every document.
 CLASSIFIER = os.getenv("CLASSIFIER", "fast").strip().lower() if os.getenv("CLASSIFIER", "fast").strip().lower() in {"fast", "llm"} else "fast"
 LLM_INPUT_CHARS = int(os.getenv("LLM_INPUT_CHARS", "1500"))
@@ -1213,7 +1218,53 @@ def scan_loop():
 
 def start_worker():
     global WORKER_STARTED
-    if not WORKER_STARTED: WORKER_STARTED = True; threading.Thread(target=scan_loop, daemon=True).start()
+    if not WORKER_STARTED:
+        WORKER_STARTED = True
+        threading.Thread(target=scan_loop, daemon=True).start()
+        threading.Thread(target=search_loop, daemon=True).start()
+
+def full_text_for_row(row):
+    """Complete readable text of an archived document for the search index (OCRs only scans without a text layer)."""
+    path = file_path_for_row(row)
+    if not path.is_file(): return row.get("ocr_text", "")
+    if path.suffix.lower() == ".pdf":
+        with fitz.open(path) as document:
+            pages = range(min(len(document), SEARCH_MAX_PAGES))
+            text = "\n\n".join(document.load_page(index).get_text("text") for index in pages)
+            if len(text.strip()) < OCR_TRIGGER_CHARS * max(1, min(len(pages), SEARCH_OCR_PAGES)):
+                saved = row.get("ocr_text", "")
+                if len(saved.strip()) > len(text.strip()): return saved
+                scale = fitz.Matrix(OCR_DPI / 72, OCR_DPI / 72)
+                ocr = []
+                for index in range(min(len(document), SEARCH_OCR_PAGES)):
+                    pixmap = document.load_page(index).get_pixmap(matrix=scale, alpha=False)
+                    ocr.append(pytesseract.image_to_string(Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples), lang=OCR_LANG))
+                text = f"{text}\n\n" + "\n\n".join(ocr)
+    else:
+        text = read_document_text(path)[0]
+    return text[:SEARCH_MAX_CHARS]
+
+def search_description(row):
+    return Path(row.get("stored_path", "")).name, sorted(row_tags(row))
+
+SEARCH = SearchIndex(SEARCH_DB_PATH, full_text_for_row, OLLAMA_URL, EMBED_MODEL, enabled=AI_MODE != "heuristic" and bool(EMBED_MODEL))
+
+def search_loop():
+    """Keep the search index in sync with the archive, at low CPU priority so the UI and pipeline stay responsive."""
+    try: os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 15)
+    except (AttributeError, OSError): pass
+    time.sleep(10)
+    while True:
+        SEARCH.ollama_url, SEARCH.enabled = OLLAMA_URL.rstrip("/"), AI_MODE != "heuristic" and bool(EMBED_MODEL)
+        try:
+            SEARCH.state["state"] = "indexing"
+            changed = SEARCH.sync([row for row in read_rows() if row.get("location") == "archive"], search_description)
+            if changed: log.info("Search index updated for %s document(s)", changed)
+            SEARCH.state["state"] = "idle"
+        except Exception as error:
+            log.exception("Search indexing failed")
+            SEARCH.state.update(state="error", error=str(error))
+        time.sleep(60)
 
 def search_rows(rows, query):
     terms = query.lower().split()
@@ -1374,6 +1425,140 @@ def external_document_by_id(row_id):
     row = next((item for item in read_rows() if item.get("id") == row_id and item.get("location") == "archive"), None)
     if not row: abort(404)
     return jsonify(external_document(row))
+
+def external_filters(args):
+    """Archive rows matching the optional years / categories / tags filters (comma-separated strings or lists)."""
+    def values(key):
+        value = args.get(key) or []
+        return [str(item).strip() for item in (value.split(",") if isinstance(value, str) else value) if str(item).strip()]
+    years, categories = set(values("years")), set(values("categories"))
+    aliases = tag_aliases()
+    tags = {canonical_tag(tag, aliases) for tag in values("tags")}
+    return {row["id"]: row for row in read_rows() if row.get("location") == "archive" and (not years or row.get("year") in years) and (not categories or row.get("category") in categories) and (not tags or tags.issubset(row_tags(row)))}
+
+def run_external_search(args):
+    query = str(args.get("q") or args.get("query") or "").strip()
+    mode = str(args.get("mode") or "hybrid").strip().lower()
+    if mode not in {"hybrid", "keyword", "semantic"}: raise ValueError("mode must be hybrid, keyword, or semantic.")
+    try: limit = max(1, min(100, int(args.get("limit") or 10)))
+    except (TypeError, ValueError): raise ValueError("limit must be a number between 1 and 100.")
+    rows = external_filters(args)
+    if not query:
+        ordered = sorted(rows.values(), key=lambda row: (row.get("date", ""), row.get("stored_path", "")), reverse=True)
+        return {"query": "", "mode": mode, "count": len(ordered), "documents": [external_document(row) for row in ordered[:limit]]}
+    hits = SEARCH.search(query, set(rows), limit, mode)
+    return {"query": query, "mode": mode, "count": len(hits), "documents": [{**external_document(rows[hit.pop("id")]), **hit} for hit in hits]}
+
+def external_document_text(row_id, offset=0, limit=20000):
+    row = next((item for item in read_rows() if item.get("id") == row_id and item.get("location") == "archive"), None)
+    if not row: return None
+    text = SEARCH.text(row_id)
+    if text is None: text = full_text_for_row(row)
+    offset, limit = max(0, int(offset or 0)), max(1, min(100000, int(limit or 20000)))
+    part = text[offset:offset + limit]
+    return {"id": row_id, "name": Path(row.get("stored_path", "")).name, "offset": offset, "length": len(part), "total_length": len(text), "next_offset": offset + len(part) if offset + len(part) < len(text) else None, "text": part}
+
+@app.get("/api/external/v1/search")
+def external_search():
+    """Hybrid full-text + semantic search over the content of archived documents."""
+    if not external_api_authorized(): abort(401)
+    try: return jsonify(run_external_search(request.args))
+    except ValueError as error: abort(400, str(error))
+    except requests.RequestException: abort(503, "Semantic search is unavailable (Ollama embedding model not reachable).")
+
+@app.get("/api/external/v1/documents/<row_id>/text")
+def external_document_text_route(row_id):
+    """Extracted plain text of one document, paginated with offset/limit (characters)."""
+    if not external_api_authorized(): abort(401)
+    try: result = external_document_text(row_id, request.args.get("offset", 0), request.args.get("limit", 20000))
+    except ValueError: abort(400, "offset and limit must be numbers.")
+    if not result: abort(404)
+    return jsonify(result)
+
+@app.get("/api/external/v1/search/status")
+def external_search_status():
+    if not external_api_authorized(): abort(401)
+    return jsonify(SEARCH.stats())
+
+# ---------- MCP (Model Context Protocol, Streamable HTTP transport, stateless JSON responses) ----------
+
+MCP_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+MCP_FILTER_SCHEMA = {
+    "years": {"type": "array", "items": {"type": "string"}, "description": "Only documents from these years, e.g. [\"2023\", \"2024\"]."},
+    "categories": {"type": "array", "items": {"type": "string"}, "description": "Only these categories (see list_catalog)."},
+    "tags": {"type": "array", "items": {"type": "string"}, "description": "Documents must carry all of these tags (see list_catalog)."},
+}
+MCP_TOOLS = [
+    {"name": "search_documents", "title": "Search documents",
+     "description": "Search the personal document archive (mostly German letters, invoices, contracts, insurance, tax and bank documents) by meaning and keywords across the full document text. Returns matching documents with metadata, summary and the best matching passages. Query in German for best results; use get_document_text to read a full document.",
+     "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "description": "What to look for, in natural language or keywords."}, "mode": {"type": "string", "enum": ["hybrid", "keyword", "semantic"], "default": "hybrid"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10}, **MCP_FILTER_SCHEMA}, "required": ["query"]},
+     "annotations": {"readOnlyHint": True, "openWorldHint": False}},
+    {"name": "list_documents", "title": "List documents",
+     "description": "List archived documents (newest first) matching year/category/tag filters, without a text query.",
+     "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 25}, **MCP_FILTER_SCHEMA}},
+     "annotations": {"readOnlyHint": True, "openWorldHint": False}},
+    {"name": "get_document", "title": "Get document", "description": "Metadata and summary of one document by id.",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+     "annotations": {"readOnlyHint": True, "openWorldHint": False}},
+    {"name": "get_document_text", "title": "Read document text",
+     "description": "Full extracted text of one document. Long documents are paginated: call again with offset=next_offset.",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "offset": {"type": "integer", "minimum": 0, "default": 0}, "max_chars": {"type": "integer", "minimum": 500, "maximum": 50000, "default": 20000}}, "required": ["id"]},
+     "annotations": {"readOnlyHint": True, "openWorldHint": False}},
+    {"name": "list_catalog", "title": "List years, categories and tags", "description": "Valid filter values (years, categories, most common tags) with document counts.",
+     "inputSchema": {"type": "object", "properties": {}}, "annotations": {"readOnlyHint": True, "openWorldHint": False}},
+]
+MCP_INSTRUCTIONS = "DOGGS is a read-only personal document archive, mostly in German. Use search_documents first (German queries work best), then get_document_text to read a document before answering questions about its contents. Cite document names and dates."
+
+def external_catalog_payload():
+    rows = [row for row in read_rows() if row.get("location") == "archive"]
+    tag_counts = Counter(tag for row in rows for tag in row_tags(row))
+    category_counts = Counter(row.get("category") for row in rows if row.get("category"))
+    return {"years": [{"value": year, "count": count} for year, count in sorted(Counter(row.get("year") for row in rows if row.get("year")).items(), reverse=True)], "categories": [{"value": value, "count": count} for value, count in category_counts.most_common()], "tags": [{"value": value, "count": count} for value, count in tag_counts.most_common(MAX_TOKEN_FACETS)]}
+
+def mcp_call_tool(name, args):
+    if name == "search_documents": return run_external_search({**args, "limit": min(50, int(args.get("limit") or 10))})
+    if name == "list_documents": return run_external_search({**args, "query": ""})
+    if name == "list_catalog": return external_catalog_payload()
+    if name in {"get_document", "get_document_text"}:
+        row_id = str(args.get("id") or "").strip()
+        if name == "get_document_text": result = external_document_text(row_id, args.get("offset", 0), args.get("max_chars", 20000))
+        else: result = next((external_document(row) for row in read_rows() if row.get("id") == row_id and row.get("location") == "archive"), None)
+        if not result: raise ValueError(f"No archived document with id {row_id!r}.")
+        return result
+    raise LookupError(name)
+
+def mcp_handle(message):
+    """Answer one JSON-RPC message; returns None for notifications."""
+    if not isinstance(message, dict) or message.get("jsonrpc") != "2.0": return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}
+    method, params, request_id = message.get("method"), message.get("params") or {}, message.get("id")
+    if "id" not in message or method is None: return None  # notification or client response
+    def result(value): return {"jsonrpc": "2.0", "id": request_id, "result": value}
+    def error(code, text): return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": text}}
+    if method == "initialize":
+        requested = params.get("protocolVersion")
+        return result({"protocolVersion": requested if requested in MCP_PROTOCOL_VERSIONS else MCP_PROTOCOL_VERSIONS[0], "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "doggs", "title": "DOGGS document archive", "version": "1.0"}, "instructions": MCP_INSTRUCTIONS})
+    if method == "ping": return result({})
+    if method == "tools/list": return result({"tools": MCP_TOOLS})
+    if method == "tools/call":
+        name, args = params.get("name"), params.get("arguments") or {}
+        try: payload = mcp_call_tool(name, args)
+        except LookupError: return error(-32602, f"Unknown tool: {name}")
+        except (ValueError, TypeError) as problem: return result({"content": [{"type": "text", "text": str(problem)}], "isError": True})
+        except requests.RequestException: return result({"content": [{"type": "text", "text": "Semantic search is unavailable right now; retry with mode=keyword."}], "isError": True})
+        return result({"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}], "structuredContent": payload})
+    return error(-32601, f"Method not found: {method}")
+
+@app.route("/api/external/v1/mcp", methods=["GET", "POST", "DELETE"])
+def external_mcp():
+    """MCP server endpoint for LLM clients (Claude Code, Claude Desktop via mcp_stdio.py, …)."""
+    if not external_api_authorized():
+        return jsonify({"jsonrpc": "2.0", "id": None, "error": {"code": -32001, "message": "Unauthorized: send Authorization: Bearer <EXTERNAL_API_TOKEN>."}}), 401
+    if request.method != "POST": return "", 405, {"Allow": "POST"}  # stateless server: no SSE stream, no sessions
+    body = request.get_json(silent=True)
+    if body is None: return jsonify({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}), 400
+    responses = [response for response in map(mcp_handle, body if isinstance(body, list) else [body]) if response]
+    if not responses: return "", 202
+    return jsonify(responses if isinstance(body, list) else responses[0])
 
 @app.route("/api/file/<row_id>/duplicates")
 def file_duplicates(row_id):

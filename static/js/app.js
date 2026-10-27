@@ -87,6 +87,7 @@ function restoreUrlState() {
   if (!settings && $('settingsDialog').open) $('settingsDialog').close();
 }
 
+let refreshRequest = 0;
 async function refresh() {
   const p = new URLSearchParams();
   if (state.q) p.set('q', state.q);
@@ -98,9 +99,11 @@ async function refresh() {
   if (state.demo) p.set('demo', 'true');
   const selectedId = state.selected?.id || state.requestedDocument;
   if (selectedId) p.set('document', selectedId);
+  const request = ++refreshRequest;
   const r = await fetch('/api/index?' + p);
-  if (!r.ok) return;
+  if (!r.ok || request !== refreshRequest) return;
   const d = await r.json();
+  if (request !== refreshRequest) return;  // a newer refresh (e.g. after a tag edit) superseded this one
   availableYears = (d.years || []).map(i => i.value);
   availableCategories = (d.categories || []).map(i => i.value);
   favoriteTags = d.favorite_tags || [];
@@ -792,6 +795,22 @@ async function removeDuplicate(id, list) {
   if (!state.selected && !$('duplicatesView').classList.contains('open')) clearSelection(true);
 }
 
+async function removeSelectedDocument() {
+  const f = state.selected;
+  if (!f || !confirm('Remove "' + f.name + '"?\n\nThe file is moved to the trash folder and removed from the archive index.')) return;
+  const cards = [...document.querySelectorAll('#files .file')].map(card => card.dataset.fileId);
+  const index = cards.indexOf(f.id);
+  const nextId = cards[index + 1] || cards[index - 1] || '';
+  const r = await fetch('/api/file/' + encodeURIComponent(f.id), { method: 'DELETE' });
+  if (!r.ok) { $('editorStatus').textContent = 'Could not remove this document.'; return }
+  // Continue with the neighbouring document so the user can keep working through the list.
+  state.selected = null;
+  state.requestedDocument = nextId;
+  if (!nextId) clearSelection(true);
+  await refresh();
+  if (nextId) syncUrl(true);
+}
+
 async function refreshStatus() {
   try {
     const s = await (await fetch('/api/status')).json(), p = s.pipeline;
@@ -1136,6 +1155,7 @@ $('cleanDuplicatesButton').onclick = async () => {
   await refresh();
 };
 $('saveDetails').onclick = saveDetails;
+$('removeDocument').onclick = removeSelectedDocument;
 $('yearInput').onchange = moveDocumentYear;
 $('categoryInput').onchange = moveDocumentCategory;
 $('clearMulti').onclick = clearMulti;
