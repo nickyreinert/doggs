@@ -200,6 +200,11 @@
       <option value="ollama">Ollama (local LLM)</option>
       <option value="heuristic">Heuristics only</option>
     </select>
+    <label class="editor" for="generalClassifier">Category classification</label>
+    <select id="generalClassifier">
+      <option value="fast">Fast classifier (automatic, no LLM; LLM only via Re-extract)</option>
+      <option value="llm">LLM for every new document</option>
+    </select>
     <label class="editor" for="generalOllamaUrl">Ollama URL</label>
     <input id="generalOllamaUrl" placeholder="http://127.0.0.1:11434">
     <label class="editor" for="generalAiModel">Ollama model</label>

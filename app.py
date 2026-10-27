@@ -25,6 +25,8 @@ import pytesseract
 import requests
 from dateutil import parser as dateparser
 from docx import Document
+
+from classifier import FastClassifier
 from flask import Flask, abort, jsonify, render_template, request, send_file
 from openpyxl import load_workbook
 from odf import teletype
@@ -63,6 +65,10 @@ OCR_TRIGGER_CHARS, MAX_SOURCE_CHARS = int(os.getenv("OCR_TRIGGER_CHARS", "80")),
 MAX_TEXT_CHARS, MAX_FULL_TEXT_CHARS, AI_TIMEOUT = int(os.getenv("MAX_TEXT_CHARS", "300")), int(os.getenv("MAX_FULL_TEXT_CHARS", "12000")), int(os.getenv("AI_TIMEOUT", "60"))
 AI_MODE, OLLAMA_URL = os.getenv("AI_MODE", "ollama"), os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:3b")
+# "fast" categorizes new documents locally and runs the LLM only on request; "llm" asks the LLM for every document.
+CLASSIFIER = os.getenv("CLASSIFIER", "fast").strip().lower() if os.getenv("CLASSIFIER", "fast").strip().lower() in {"fast", "llm"} else "fast"
+LLM_INPUT_CHARS = int(os.getenv("LLM_INPUT_CHARS", "1500"))
+FAST_MIN_CONFIDENCE = float(os.getenv("FAST_MIN_CONFIDENCE", "0.6"))
 DATE_DAYFIRST = os.getenv("DATE_DAYFIRST", "1") == "1"
 MAX_TOKEN_FACETS = int(os.getenv("MAX_TOKEN_FACETS", "80"))
 TEXT_FORMATS = {
@@ -74,7 +80,7 @@ IMAGE_FORMATS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gi
 SUPPORTED_FORMATS = {".pdf", *TEXT_FORMATS, *IMAGE_FORMATS}
 LLM_SOURCE_LINES = int(os.getenv("LLM_SOURCE_LINES", "80"))
 DEFAULT_CATEGORIES = ["financial-document", "invoice", "incoming", "outgoing", "banking", "tax-office", "insurance", "contract", "personal", "misc"]
-FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "category", "rule_name", "rule_reason", "summary", "tokens", "removed_tags", "tags", "ocr_text", "is_duplicate", "duplicate_of", "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer", "source", "created_at"]
+FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "category", "category_source", "rule_name", "rule_reason", "summary", "tokens", "removed_tags", "tags", "ocr_text", "is_duplicate", "duplicate_of", "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer", "source", "created_at"]
 STOP_TAGS = {"the", "and", "for", "doc", "document", "pdf", "misc", "unknown", "fpdf", "pdflib", "printer", "linux", "php", "kunde", "page", "pages", "creator", "producer"}
 PROMPT_STOP_WORDS = STOP_TAGS | {"a", "an", "are", "as", "at", "be", "by", "from", "in", "is", "it", "of", "on", "or", "that", "this", "to", "with", "der", "die", "das", "den", "dem", "des", "ein", "eine", "einer", "einem", "einen", "und", "oder", "ist", "im", "in", "am", "an", "auf", "von", "für", "mit", "zu", "bei", "als", "auch", "nicht", "wie", "dass"}
 CLASSIFICATION_RULES = [("invoice", ["invoice", "rechnung", "billing", "amount due", "zahlung"]), ("bank", ["bank statement", "kontoauszug", "iban", "balance", "transaction"]), ("insurance", ["insurance", "versicherung", "policy", "claim", "premium"]), ("contract", ["contract", "agreement", "vertrag", "terms"]), ("tax", ["tax", "steuer", "finanzamt", "vat"]), ("medical", ["medical", "arzt", "doctor", "patient"]), ("utility", ["electricity", "gas", "water", "internet", "phone"]), ("salary", ["salary", "payroll", "gehalt", "lohn"]), ("official", ["authority", "bescheid", "government", "court"]), ("receipt", ["receipt", "quittung", "purchase"])]
@@ -250,7 +256,7 @@ def normalize_rule(rule):
         "tags": tag_values(rule.get("tags", [])),
     }
 
-GENERAL_ENV_MAP = {"incoming_dir": "INCOMING_DIR", "archive_dir": "ARCHIVE_DIR", "error_dir": "ERROR_DIR", "duplicate_dir": "DUPLICATE_DIR", "trash_dir": "TRASH_DIR", "recursive_scan": "RECURSIVE_SCAN", "ocr_lang": "OCR_LANG", "ai_mode": "AI_MODE", "ollama_url": "OLLAMA_URL", "ai_model": "AI_MODEL"}
+GENERAL_ENV_MAP = {"incoming_dir": "INCOMING_DIR", "archive_dir": "ARCHIVE_DIR", "error_dir": "ERROR_DIR", "duplicate_dir": "DUPLICATE_DIR", "trash_dir": "TRASH_DIR", "recursive_scan": "RECURSIVE_SCAN", "ocr_lang": "OCR_LANG", "ai_mode": "AI_MODE", "ollama_url": "OLLAMA_URL", "ai_model": "AI_MODEL", "classifier": "CLASSIFIER"}
 
 def general_locked_fields():
     """Fields whose environment variable is explicitly set can't be overridden from the UI."""
@@ -265,11 +271,11 @@ def general_is_configured(raw_general):
     return all(locked.get(key) for key in STORAGE_DIR_KEYS)
 
 def current_general_defaults():
-    return {"incoming_dir": str(INCOMING_DIR), "archive_dir": str(ARCHIVE_DIR), "error_dir": str(ERROR_DIR), "duplicate_dir": str(DUPLICATE_DIR), "trash_dir": str(TRASH_DIR), "recursive_scan": RECURSIVE_SCAN, "ocr_lang": OCR_LANG, "ai_mode": AI_MODE, "ollama_url": OLLAMA_URL, "ai_model": AI_MODEL}
+    return {"incoming_dir": str(INCOMING_DIR), "archive_dir": str(ARCHIVE_DIR), "error_dir": str(ERROR_DIR), "duplicate_dir": str(DUPLICATE_DIR), "trash_dir": str(TRASH_DIR), "recursive_scan": RECURSIVE_SCAN, "ocr_lang": OCR_LANG, "ai_mode": AI_MODE, "ollama_url": OLLAMA_URL, "ai_model": AI_MODEL, "classifier": CLASSIFIER}
 
 def apply_general_settings(general):
     """Reassign the live directory/AI globals so a settings change applies without a restart."""
-    global INCOMING_DIR, ARCHIVE_DIR, ERROR_DIR, DUPLICATE_DIR, TRASH_DIR, RECURSIVE_SCAN, OCR_LANG, OCR_LANGS, AI_MODE, OLLAMA_URL, AI_MODEL
+    global INCOMING_DIR, ARCHIVE_DIR, ERROR_DIR, DUPLICATE_DIR, TRASH_DIR, RECURSIVE_SCAN, OCR_LANG, OCR_LANGS, AI_MODE, OLLAMA_URL, AI_MODEL, CLASSIFIER
     locked = general_locked_fields()
     def resolved(key, current_path):
         if locked.get(key): return current_path
@@ -289,6 +295,7 @@ def apply_general_settings(general):
     if not locked.get("ai_mode") and general.get("ai_mode") in {"ollama", "heuristic"}: AI_MODE = general["ai_mode"]
     if not locked.get("ollama_url") and str(general.get("ollama_url") or "").strip(): OLLAMA_URL = str(general["ollama_url"]).strip()
     if not locked.get("ai_model") and str(general.get("ai_model") or "").strip(): AI_MODEL = str(general["ai_model"]).strip()
+    if not locked.get("classifier") and general.get("classifier") in {"fast", "llm"}: CLASSIFIER = general["classifier"]
     ensure_dirs()
 
 def ignored_tags(): return set(read_settings()["ignored_tags"])
@@ -426,7 +433,7 @@ def extract_text_document(path):
     if suffix in IMAGE_FORMATS:
         text = ocr_image_text(path, HEAD_PAGES)
         lines = [line.strip() for line in text.splitlines() if line.strip()]
-        return "\n".join(lines[-LLM_SOURCE_LINES:])[:MAX_FULL_TEXT_CHARS], "ocr"
+        return "\n".join(lines[:LLM_SOURCE_LINES])[:MAX_FULL_TEXT_CHARS], "ocr"
     if suffix in {".txt", ".md", ".log", ".ini", ".yaml", ".yml", ".tex", ".rtf"}:
         text = path.read_text(encoding="utf-8", errors="replace")
         if suffix == ".rtf":
@@ -476,7 +483,7 @@ def extract_text_document(path):
     else:
         raise ValueError(f"Unsupported document format: {suffix}")
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return "\n".join(lines[-LLM_SOURCE_LINES:])[:MAX_FULL_TEXT_CHARS], f"{suffix.removeprefix('.')}-text"
+    return "\n".join(lines[:LLM_SOURCE_LINES])[:MAX_FULL_TEXT_CHARS], f"{suffix.removeprefix('.')}-text"
 
 def document_content(path):
     if path.suffix.lower() == ".pdf":
@@ -592,24 +599,63 @@ def resolved_category(extracted, classification, categories):
     fallback = fallback_by_classification.get(classification, "misc")
     return fallback if fallback in categories else "misc"
 
-def replace_extracted_result(row, heuristic, extracted, text, filename):
-    """Replace generated fields only; the user's manual `tags` field is immutable here."""
-    tags = combined_tags(heuristic, extracted, text)
-    row["classification"] = slugify(heuristic["classification"] if heuristic["classification"] != "document" else extracted.get("classification") or "document")
+FAST_MODEL_CACHE = {"key": None, "model": None}
+TRAINED_CATEGORY_SOURCES = {"manual", "rule"}
+
+def training_text(row):
+    return " ".join(row.get(key, "") for key in ("original_name", "pdf_title", "pdf_subject", "summary", "tokens", "tags", "ocr_text"))[:4000]
+
+def fast_classifier():
+    """The fast classifier, retrained whenever the index or the category list changes."""
+    categories = tuple(read_settings()["categories"])
+    try: index_version = CSV_PATH.stat().st_mtime_ns
+    except OSError: index_version = 0
+    key = (index_version, categories)
+    if FAST_MODEL_CACHE["key"] != key:
+        examples = [(training_text(row), row["category"]) for row in read_rows() if row.get("category_source") in TRAINED_CATEGORY_SOURCES and row.get("category") and row.get("location") != "duplicates"]
+        FAST_MODEL_CACHE.update(key=key, model=FastClassifier(categories, examples))
+    return FAST_MODEL_CACHE["model"]
+
+def choose_category(extracted, classification, text, row=None):
+    """Return (category, source). A category the user picked by hand is never replaced automatically."""
     categories = read_settings()["categories"]
-    row["category"] = resolved_category(extracted, row["classification"], categories)
+    if row and row.get("category_source") == "manual" and row.get("category"): return row["category"], "manual"
+    candidate = slugify(extracted.get("category"))
+    if candidate in categories: return candidate, "llm"
+    category, _ = fast_classifier().predict(text, FAST_MIN_CONFIDENCE)
+    if category: return category, "fast"
+    return resolved_category({}, classification, categories), "fallback"
+
+def automatic_ai_extract(text, preserve_lines=False):
+    """LLM extraction for unattended processing; skipped in fast mode, where the LLM only runs on request."""
+    return ai_extract(text, preserve_lines) if CLASSIFIER == "llm" else {}
+
+def replace_extracted_result(row, heuristic, extracted, text, filename, keep_existing=False):
+    """Replace generated fields only; the user's manual `tags` field is immutable here.
+
+    With `keep_existing`, a run without LLM output keeps the previous summary, tags and slug
+    so a fast re-scan does not throw away earlier LLM results.
+    """
+    keep_generated = keep_existing and not extracted and bool(row.get("summary"))
+    tags = tag_values(row.get("tokens", "")) if keep_generated else combined_tags(heuristic, extracted, text)
+    if not (keep_generated and heuristic["classification"] == "document"):
+        row["classification"] = slugify(heuristic["classification"] if heuristic["classification"] != "document" else extracted.get("classification") or "document")
+    categories = read_settings()["categories"]
+    category, category_source = choose_category(extracted, row["classification"], text, row)
     suffix = Path(filename).suffix.lower().removeprefix(".")
     rule, reasons = match_rule(filename, suffix, text)
     if rule:
-        if rule.get("category") and rule["category"] in categories: row["category"] = rule["category"]
+        if rule.get("category") and rule["category"] in categories and category_source != "manual": category, category_source = rule["category"], "rule"
         tags = list(dict.fromkeys(tags + rule.get("tags", [])))
         row["rule_name"], row["rule_reason"] = rule.get("name") or "Unnamed rule", "; ".join(reasons)
     else:
         row["rule_name"], row["rule_reason"] = "", ""
-    row["summary"] = (heuristic["summary"] if heuristic["classification"] == "invoice" else extracted.get("summary") or heuristic["summary"]).strip()[:240]
+    row["category"], row["category_source"] = category, category_source
     row["tokens"] = " ".join(tags)
-    row["removed_tags"] = ""
-    row["slug"] = slugify("-".join(tags[:3]) or heuristic["slug"])
+    if not keep_generated:
+        row["summary"] = (heuristic["summary"] if heuristic["classification"] == "invoice" else extracted.get("summary") or heuristic["summary"]).strip()[:240]
+        row["removed_tags"] = ""
+        row["slug"] = slugify("-".join(tags[:3]) or heuristic["slug"])
     return row
 
 def update_generated_filename(row):
@@ -626,8 +672,8 @@ def update_generated_filename(row):
         shutil.move(str(current_path), destination)
     row["stored_path"] = destination.relative_to(ARCHIVE_DIR).as_posix()
 
-def replace_extracted_result_and_filename(row, heuristic, extracted, text, filename):
-    replace_extracted_result(row, heuristic, extracted, text, filename)
+def replace_extracted_result_and_filename(row, heuristic, extracted, text, filename, keep_existing=False):
+    replace_extracted_result(row, heuristic, extracted, text, filename, keep_existing)
     update_generated_filename(row)
     return row
 
@@ -635,7 +681,7 @@ def ai_extract(text, preserve_lines=False):
     if AI_MODE != "ollama" or len(text.strip()) < 20: return {}
     settings = read_settings(); prompt, categories = settings["prompts"]["metadata"], settings["categories"]
     category_instruction = "Choose category as exactly one of: " + ", ".join(categories) + "."
-    evidence = text.strip()[:MAX_FULL_TEXT_CHARS] if preserve_lines else compact_prompt_text(text)
+    evidence = text.strip()[:LLM_INPUT_CHARS] if preserve_lines else compact_prompt_text(text)
     payload = {"model": AI_MODEL, "stream": False, "format": "json", "options": {"temperature": 0, "num_predict": 260}, "messages": [{"role": "system", "content": "Return only valid JSON. Every extracted tag must be grounded in the supplied document text. Never copy names, places, or tag values from instructions. Omit uncertain data instead of guessing. Ignore PDF generators, software names, headers/footers, and OCR garbage. Write the summary in the document language. " + category_instruction}, {"role": "user", "content": prompt + "\n\nAdd a category field to the JSON response.\n\nDocument evidence:\n" + evidence}]}
     try:
         raw = requests.post(f"{OLLAMA_URL.rstrip('/')}/api/chat", json=payload, timeout=AI_TIMEOUT).json().get("message", {}).get("content", "")
@@ -768,9 +814,9 @@ def run_bulk_rescan(row_ids):
                     text, source, metadata_fields, _ = document_content(path)
                 metadata = " ".join(metadata_fields[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if metadata_fields.get(key))
                 analysis = f"{metadata} {text}".strip()
-                heuristic, extracted = heuristic_extract(analysis, path.name), ai_extract(analysis, path.suffix.lower() != ".pdf")
+                heuristic, extracted = heuristic_extract(analysis, path.name), automatic_ai_extract(analysis, path.suffix.lower() != ".pdf")
                 def apply_extraction(item):
-                    replace_extracted_result_and_filename(item, heuristic, extracted, analysis, path.name)
+                    replace_extracted_result_and_filename(item, heuristic, extracted, analysis, path.name, keep_existing=True)
                     item["ocr_text"] = text; item["source"] = source
                 if not mutate_row(row_id, apply_extraction): raise ValueError("Document no longer exists in the index.")
             except Exception as exc:
@@ -792,22 +838,22 @@ def process_file(path):
     text, source, pdf_metadata, pdf_date = document_content(path)
     metadata_text = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
     analysis_text = f"{metadata_text} {text}".strip()
-    heuristics, ai = heuristic_extract(analysis_text, path.name), ai_extract(analysis_text, path.suffix.lower() != ".pdf")
+    heuristics, ai = heuristic_extract(analysis_text, path.name), automatic_ai_extract(analysis_text, path.suffix.lower() != ".pdf")
     final_date = parse_any_date(ai.get("date")) or parse_text_date(analysis_text) or pdf_date or datetime.fromtimestamp(path.stat().st_mtime).date()
     classification = slugify(ai.get("classification") or heuristics["classification"])
     inferred = combined_tags(heuristics, ai, analysis_text)
     categories = read_settings()["categories"]
-    category = resolved_category(ai, classification, categories)
+    category, category_source = choose_category(ai, classification, analysis_text)
     rule, reasons = match_rule(path.name, path.suffix.lower().removeprefix("."), analysis_text)
     rule_name, rule_reason = "", ""
     if rule:
-        if rule.get("category") and rule["category"] in categories: category = rule["category"]
+        if rule.get("category") and rule["category"] in categories: category, category_source = rule["category"], "rule"
         inferred = list(dict.fromkeys(inferred + rule.get("tags", [])))
         rule_name, rule_reason = rule.get("name") or "Unnamed rule", "; ".join(reasons)
     slug = slugify("-".join(inferred[:3]) or heuristics["slug"] or classification)
     destination = unique_path(ARCHIVE_DIR / str(final_date.year) / f"{final_date.isoformat()}_{slug}{path.suffix.lower()}"); destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(path), destination)
-    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "category": category, "rule_name": rule_name, "rule_reason": rule_reason, "summary": (heuristics["summary"] if heuristics["classification"] == "invoice" else ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(inferred), "removed_tags": "", "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
+    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "category": category, "category_source": category_source, "rule_name": rule_name, "rule_reason": rule_reason, "summary": (heuristics["summary"] if heuristics["classification"] == "invoice" else ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(inferred), "removed_tags": "", "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
     write_rows(rows); log.info("Archived %s", destination)
 
 def promote_orphaned_duplicates(rows):
@@ -1095,6 +1141,7 @@ def update_file(row_id):
     if "category" in payload:
         category = str(payload["category"] or "").strip()
         if category and category != row.get("category") and category not in read_settings()["categories"]: abort(400, "Unknown category.")
+        if category != row.get("category"): row["category_source"] = "manual" if category else ""
         row["category"] = category
     if "title" in payload: row["pdf_title"] = re.sub(r"\s+", " ", str(payload["title"])).strip()[:500]
     if "summary" in payload: row["summary"] = str(payload["summary"]).strip()[:4000]
@@ -1200,7 +1247,7 @@ def bulk_update_files():
     if not changed: abort(404)
     for row in changed:
         if tag: row["tags"] = " ".join(dict.fromkeys(custom_tags(row) + [tag]))
-        if category: row["category"] = category
+        if category: row["category"], row["category_source"] = category, "manual"
     write_rows(rows)
     if tag: remember_recent_tags([tag])
     STATUS_CACHE["payload"] = None
@@ -1267,6 +1314,7 @@ def api_status():
         "ollama_connected": connected,
         "ollama_url": OLLAMA_URL,
         "model": AI_MODEL,
+        "classifier": CLASSIFIER,
         "model_available": AI_MODEL in available,
         "error": error,
         "ocr_language": OCR_LANG,

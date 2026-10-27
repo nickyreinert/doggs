@@ -9,7 +9,8 @@ It has no cloud account, no database server, and no mandatory AI dependency.
 - Watches an inbox for supported documents every five minutes, and scans once immediately at startup.
 - Reads embedded PDF metadata (title, author, subject, keywords, creator, producer, and dates) and extracts text from PDFs, DOCX, XLSX, PPTX, ODT, ODS, ODP, CSV, TSV, TXT, Markdown, HTML, XML, JSON, YAML, RTF, EPUB, and similar text-based files.
 - Uses Tesseract OCR for scanned PDFs with little embedded text and for scanned images (PNG, JPEG, TIFF, BMP, WebP, GIF).
-- Optionally asks a local Ollama model for date, classification, main category, filename slug, and summary.
+- Assigns a main category with a fast built-in classifier (German keyword seeds plus Naive Bayes that learns from your manual category choices); no LLM needed.
+- Optionally asks a local Ollama model for date, classification, main category, filename slug, and summary — for every new document, or only on request via **Re-extract**.
 - Falls back to deterministic rules when Ollama is unavailable.
 - Stores documents under `archive/YYYY/YYYY-MM-DD_slug.<original-extension>` and detects duplicates by SHA-256.
 - Keeps searchable metadata in `data/index.csv`.
@@ -139,6 +140,9 @@ Restart DOGGS after changing `.env`. Relative local paths are resolved from the 
 | `OCR_LANG` | Tesseract language code | `eng` |
 | `AI_MODE` | `ollama` or `heuristic` | `ollama` |
 | `AI_MODEL` | Local metadata model | `qwen2.5:3b` |
+| `CLASSIFIER` | `fast` (built-in classifier; LLM only on request) or `llm` (LLM for every new document) | `fast` |
+| `LLM_INPUT_CHARS` | Maximum characters of a text document sent to the LLM | `1500` |
+| `FAST_MIN_CONFIDENCE` | Minimum confidence before the fast classifier assigns a category | `0.6` |
 | `EXTERNAL_API_TOKEN` | Bearer token required by the external archive API | unset (API disabled) |
 
 The footer reports Ollama connectivity, selected-model availability, and OCR-language readiness.
@@ -184,11 +188,11 @@ DOGGS defaults to `qwen2.5:3b`, a small model for local metadata extraction. Oll
 
 ## Supported file formats
 
-DOGGS archives PDFs, scanned images (read with OCR), plain text files, CSV files, and modern Microsoft Office files: `.docx`, `.xlsx`, and `.pptx`. Their original file format is retained in the archive. For non-PDF documents, DOGGS reads the final 80 non-empty lines (configurable through `LLM_SOURCE_LINES`) and sends that text to the local LLM; it does not run OCR. Images always go through OCR. Legacy `.doc`/`.xls`/`.ppt` files are not supported; they stay in the incoming folder and are listed in the pipeline panel.
+DOGGS archives PDFs, scanned images (read with OCR), plain text files, CSV files, and modern Microsoft Office files: `.docx`, `.xlsx`, and `.pptx`. Their original file format is retained in the archive. For non-PDF documents, DOGGS reads the first 80 non-empty lines (configurable through `LLM_SOURCE_LINES`), where sender, subject, and letterhead usually are, and sends at most `LLM_INPUT_CHARS` of it to the local LLM; it does not run OCR. Images always go through OCR. Legacy `.doc`/`.xls`/`.ppt` files are not supported; they stay in the incoming folder and are listed in the pipeline panel.
 
 Older binary Office formats such as `.doc`, `.xls`, and `.ppt`, plus all other unsupported file types, remain untouched in the incoming folder.
 
-The **Categories** Settings tab manages the allowed high-level categories. The LLM assigns one of these to each document; the default categories include financial documents, invoices, incoming and outgoing documents, banking, tax office, insurance, contracts, personal documents, and miscellaneous.
+The **Categories** Settings tab manages the allowed high-level categories. In **fast** mode (Settings → General → Category classification) a built-in classifier assigns one of these in milliseconds and the LLM runs only when you click **Re-extract**; in **LLM** mode the model picks the category for every new document. Categories you set by hand are never overwritten by re-scans and train the fast classifier; categories without built-in German keywords are matched by their own name; the default categories include financial documents, invoices, incoming and outgoing documents, banking, tax office, insurance, contracts, personal documents, and miscellaneous.
 
 When local AI is enabled during installation, `install.sh` installs Ollama automatically when it is missing and pulls the selected model (default: `qwen2.5:3b`).
 

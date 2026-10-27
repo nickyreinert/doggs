@@ -711,7 +711,7 @@ async function refreshStatus() {
     $('ollamaDot').className = 'dot ' + (s.ollama_connected ? 'ok' : 'warn');
     $('ollamaStatus').textContent = s.ollama_connected ? 'Ollama connected' : s.error || 'Ollama unavailable';
     $('ollamaDot').title = $('ollamaStatus').textContent;
-    $('modelStatus').textContent = 'Model: ' + s.model;
+    $('modelStatus').textContent = (s.classifier === 'fast' ? 'Fast classifier · LLM on request: ' : 'Model: ') + s.model;
     const rescan = s.rescan || {};
     const rescanActive = ['queued', 'running'].includes(rescan.state);
     const rescanProgress = rescanActive ? ' · re-scanning ' + rescan.current + '/' + rescan.total : '';
@@ -751,7 +751,7 @@ function updateScheduleFields() {
   $('dailySchedule').hidden = !daily;
 }
 
-const GENERAL_FIELDS = { generalIncoming: 'incoming_dir', generalArchive: 'archive_dir', generalError: 'error_dir', generalDuplicate: 'duplicate_dir', generalTrash: 'trash_dir', generalOcrLang: 'ocr_lang', generalAiMode: 'ai_mode', generalOllamaUrl: 'ollama_url', generalAiModel: 'ai_model' };
+const GENERAL_FIELDS = { generalIncoming: 'incoming_dir', generalArchive: 'archive_dir', generalError: 'error_dir', generalDuplicate: 'duplicate_dir', generalTrash: 'trash_dir', generalOcrLang: 'ocr_lang', generalAiMode: 'ai_mode', generalOllamaUrl: 'ollama_url', generalAiModel: 'ai_model', generalClassifier: 'classifier' };
 
 let ruleCategories = [];
 
