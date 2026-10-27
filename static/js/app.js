@@ -469,6 +469,7 @@ function renderDocumentTags(tags) {
       const tag = entry.value;
       const chip = document.createElement('span');
       chip.className = 'tag-chip ' + (kind === 'custom' ? 'custom-tag' : 'extracted-tag');
+      chip.dataset.tag = tag;
       const filter = document.createElement('button');
       filter.className = 'document-tag-filter';
       filter.textContent = tag;
@@ -488,6 +489,7 @@ function renderDocumentTags(tags) {
 
 function selectFile(f, load = true, updateUrl = true) {
   closeDuplicates(false);
+  const sameDocument = state.selected?.id === f.id;
   state.selected = f;
   state.requestedDocument = '';
   $('detailsEditor').hidden = false;
@@ -508,7 +510,7 @@ function selectFile(f, load = true, updateUrl = true) {
     ruleBadge.textContent = '';
     ruleBadge.title = '';
   }
-  $('tagInput').value = '';
+  if (!sameDocument) { $('tagInput').value = ''; hideTagSuggestions() }
   $('filenameInput').value = f.name;
   $('summaryInput').value = f.summary || '';
   const ys = [...new Set([...availableYears, f.year])].sort().reverse();
@@ -598,6 +600,72 @@ function filterByDocumentTag(tag) {
   $('tagSearch').value = '';
   syncUrl(true);
   refresh();
+}
+
+// Tag input autocomplete: live suggestions from all archive tags, ↑/↓ to choose, Enter/Tab to apply, Esc to close.
+const tagSuggest = { items: [], index: -1, request: 0, timer: 0 };
+
+function hideTagSuggestions() {
+  tagSuggest.items = []; tagSuggest.index = -1;
+  $('tagSuggestions').hidden = true;
+  $('tagInput').setAttribute('aria-expanded', 'false');
+  $('tagInput').removeAttribute('aria-activedescendant');
+}
+
+function renderTagSuggestions() {
+  const list = $('tagSuggestions'), typed = $('tagInput').value.trim().toLowerCase();
+  list.innerHTML = '';
+  if (!tagSuggest.items.length) { hideTagSuggestions(); return }
+  tagSuggest.items.forEach((item, index) => {
+    const li = document.createElement('li');
+    li.id = 'tagSuggestion-' + index;
+    li.role = 'option';
+    li.className = 'tag-suggestion' + (index === tagSuggest.index ? ' active' : '');
+    li.setAttribute('aria-selected', index === tagSuggest.index ? 'true' : 'false');
+    const name = document.createElement('span');
+    name.className = 'tag-suggestion-name';
+    const at = typed ? item.value.toLowerCase().indexOf(typed) : -1;
+    if (at >= 0) {
+      const mark = document.createElement('mark');
+      mark.textContent = item.value.slice(at, at + typed.length);
+      name.append(item.value.slice(0, at), mark, item.value.slice(at + typed.length));
+    } else name.textContent = item.value;
+    if (item.isNew) name.prepend('Create ');
+    li.append(name);
+    if (!item.isNew) {
+      const count = document.createElement('span');
+      count.className = 'tag-suggestion-count';
+      count.textContent = (item.favorite ? '★ ' : '') + item.count;
+      li.append(count);
+    }
+    li.onmousedown = e => { e.preventDefault(); tagSuggest.index = index; applyTagSuggestion() };
+    list.append(li);
+  });
+  list.hidden = false;
+  $('tagInput').setAttribute('aria-expanded', 'true');
+  if (tagSuggest.index >= 0) {
+    $('tagInput').setAttribute('aria-activedescendant', 'tagSuggestion-' + tagSuggest.index);
+    list.children[tagSuggest.index]?.scrollIntoView({ block: 'nearest' });
+  } else $('tagInput').removeAttribute('aria-activedescendant');
+}
+
+async function loadTagSuggestions() {
+  const typed = $('tagInput').value.trim().toLowerCase(), request = ++tagSuggest.request;
+  const r = await fetch('/api/tags?q=' + encodeURIComponent(typed)).catch(() => null);
+  if (!r?.ok || request !== tagSuggest.request || document.activeElement !== $('tagInput')) return;
+  const current = new Set([...document.querySelectorAll('#documentTags [data-tag]')].map(e => e.dataset.tag));
+  const items = ((await r.json()).tags || []).filter(item => !current.has(item.value));
+  if (typed && !items.some(item => item.value.toLowerCase() === typed)) items.push({ value: typed, isNew: true });
+  tagSuggest.items = items;
+  tagSuggest.index = typed && items.length ? 0 : -1;
+  renderTagSuggestions();
+}
+
+function applyTagSuggestion() {
+  const item = tagSuggest.items[tagSuggest.index];
+  if (item) $('tagInput').value = item.value;
+  hideTagSuggestions();
+  addDocumentTag();
 }
 
 async function addDocumentTag() {
@@ -1033,7 +1101,26 @@ $('pipelineSummary').onclick = togglePipeline;
 $('query').oninput = e => { state.q = e.target.value.trim(); syncUrl(); clearTimeout(timer); timer = setTimeout(refresh, 250) };
 $('tagSearch').oninput = () => renderTags(visibleTags);
 $('tagAliasSearch').oninput = renderTagAliases;
-$('tagInput').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); addDocumentTag() } };
+$('tagInput').oninput = () => { clearTimeout(tagSuggest.timer); tagSuggest.timer = setTimeout(loadTagSuggestions, 120) };
+$('tagInput').onfocus = () => loadTagSuggestions();
+$('tagInput').onblur = () => setTimeout(hideTagSuggestions, 100);
+$('tagInput').onkeydown = e => {
+  const open = !$('tagSuggestions').hidden, count = tagSuggest.items.length;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (!open) { loadTagSuggestions(); return }
+    const step = e.key === 'ArrowDown' ? 1 : -1;
+    tagSuggest.index = tagSuggest.index < 0 ? (step > 0 ? 0 : count - 1) : (tagSuggest.index + step + count) % count;
+    renderTagSuggestions();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (open && tagSuggest.index >= 0) applyTagSuggestion(); else { hideTagSuggestions(); addDocumentTag() }
+  } else if (e.key === 'Tab' && open && tagSuggest.index >= 0 && $('tagInput').value.trim()) {
+    e.preventDefault();
+    $('tagInput').value = tagSuggest.items[tagSuggest.index].value;
+    loadTagSuggestions();
+  } else if (e.key === 'Escape' && open) { e.preventDefault(); e.stopPropagation(); hideTagSuggestions() }
+};
 $('documentTitle').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur() } };
 $('duplicates').onchange = e => { state.duplicates = e.target.checked; $('cleanDuplicatesButton').hidden = !state.duplicates; syncUrl(true); refresh() };
 $('resetFilters').onclick = () => {

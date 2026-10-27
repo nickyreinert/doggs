@@ -1194,6 +1194,17 @@ def demo_pdf_bytes():
     finally:
         document.close()
 
+@app.get("/api/tags")
+def api_tags():
+    """Tag suggestions across the whole archive: prefix matches first, then substring matches, by usage."""
+    needle = canonical_tag(request.args.get("q", "").strip().lower(), tag_aliases()).lower()
+    counts = Counter(tag for row in read_rows() for tag in row_tags(row))
+    favorites = set(read_settings()["favorite_tags"])
+    for tag in favorites: counts.setdefault(tag, 0)
+    matches = [(tag, count) for tag, count in counts.items() if not needle or needle in tag.lower()]
+    matches.sort(key=lambda item: (not item[0].lower().startswith(needle), item[0] not in favorites, -item[1], item[0]))
+    return jsonify({"tags": [{"value": tag, "count": count, "favorite": tag in favorites} for tag, count in matches[:12]]})
+
 @app.route("/api/index")
 def api_index():
     query = request.args.get("q", "").strip(); years = set(filter(None, request.args.get("years", "").split(","))); categories = set(filter(None, request.args.get("categories", "").split(","))); types = set(filter(None, request.args.get("types", "").lower().split(","))); duplicates = request.args.get("duplicates") == "1"; demo = request.args.get("demo") == "true"; rows = demo_document_rows() if demo else read_rows()

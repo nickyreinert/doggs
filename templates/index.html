@@ -117,7 +117,10 @@
                 <div class="document-tags">
                   <div id="documentTags"></div>
                   <div id="quickTags" class="quick-tags" hidden></div>
-                  <input id="tagInput" class="document-tag-input" placeholder="Add tag and press Enter">
+                  <div class="tag-combo">
+                    <input id="tagInput" class="document-tag-input" placeholder="Add tag…" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="tagSuggestions">
+                    <ul id="tagSuggestions" class="tag-suggestions" role="listbox" hidden></ul>
+                  </div>
                 </div>
               </div>
             </div>
