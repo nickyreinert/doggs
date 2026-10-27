@@ -65,7 +65,14 @@
   </aside>
   <div class="sidebar-scrim" id="sidebarScrim"></div>
   <main class="workspace" id="workspace">
-    <section class="browser" id="files" aria-label="Documents"></section>
+    <div class="browser-wrap">
+      <div class="selection-bar" id="selectionBar" hidden>
+        <span id="selectionCount"></span>
+        <span class="meta">Drag onto a category or tag to assign</span>
+        <button type="button" class="link-button" id="clearMulti">Clear</button>
+      </div>
+      <section class="browser" id="files" aria-label="Documents"></section>
+    </div>
     <div class="splitter" id="splitter" role="separator" aria-orientation="vertical" title="Drag to resize"></div>
     <section class="preview" id="preview" aria-label="Document preview">
       <div class="preview-head">
@@ -90,6 +97,10 @@
             <summary>Details <kbd>Ctrl D</kbd></summary>
             <div class="editor-grid">
               <label class="field">
+                <span>Category</span>
+                <select id="categoryInput"></select>
+              </label>
+              <label class="field">
                 <span>Folder</span>
                 <select id="yearInput"></select>
               </label>
@@ -105,6 +116,7 @@
                 <span>Tags <kbd>Ctrl T</kbd></span>
                 <div class="document-tags">
                   <div id="documentTags"></div>
+                  <div id="quickTags" class="quick-tags" hidden></div>
                   <input id="tagInput" class="document-tag-input" placeholder="Add tag and press Enter">
                 </div>
               </div>
@@ -153,6 +165,7 @@
     <div class="pipeline-error" id="pipelineError"></div>
   </div>
 </footer>
+<div class="toast" id="toast" role="status" hidden></div>
 <dialog id="settingsDialog">
 <form id="settingsForm">
   <h2>Settings</h2>

@@ -8,7 +8,7 @@ It has no cloud account, no database server, and no mandatory AI dependency.
 
 - Watches an inbox for supported documents every five minutes, and scans once immediately at startup.
 - Reads embedded PDF metadata (title, author, subject, keywords, creator, producer, and dates) and extracts text from PDFs, DOCX, XLSX, PPTX, ODT, ODS, ODP, CSV, TSV, TXT, Markdown, HTML, XML, JSON, YAML, RTF, EPUB, and similar text-based files.
-- Uses Tesseract OCR for scanned PDFs with little embedded text.
+- Uses Tesseract OCR for scanned PDFs with little embedded text and for scanned images (PNG, JPEG, TIFF, BMP, WebP, GIF).
 - Optionally asks a local Ollama model for date, classification, main category, filename slug, and summary.
 - Falls back to deterministic rules when Ollama is unavailable.
 - Stores documents under `archive/YYYY/YYYY-MM-DD_slug.<original-extension>` and detects duplicates by SHA-256.
@@ -85,7 +85,7 @@ incoming/ ──→ text extraction / OCR / metadata ──→ archive/YYYY/
                  └── processing failure ─→ errors/
 ```
 
-Supported documents are moved, not copied, after processing. OCR actions are available for PDFs; native text extraction is used for the other formats. Keep a source-scanner folder separate if it needs its own retention policy.
+Supported documents are moved, not copied, after processing. OCR actions are available for PDFs and images; native text extraction is used for the other formats. Keep a source-scanner folder separate if it needs its own retention policy.
 
 ## Installation
 
@@ -184,7 +184,7 @@ DOGGS defaults to `qwen2.5:3b`, a small model for local metadata extraction. Oll
 
 ## Supported file formats
 
-DOGGS archives PDFs, plain text files, CSV files, and modern Microsoft Office files: `.docx`, `.xlsx`, and `.pptx`. Their original file format is retained in the archive. For non-PDF documents, DOGGS reads the final 80 non-empty lines (configurable through `LLM_SOURCE_LINES`) and sends that text to the local LLM; it does not run OCR.
+DOGGS archives PDFs, scanned images (read with OCR), plain text files, CSV files, and modern Microsoft Office files: `.docx`, `.xlsx`, and `.pptx`. Their original file format is retained in the archive. For non-PDF documents, DOGGS reads the final 80 non-empty lines (configurable through `LLM_SOURCE_LINES`) and sends that text to the local LLM; it does not run OCR. Images always go through OCR. Legacy `.doc`/`.xls`/`.ppt` files are not supported; they stay in the incoming folder and are listed in the pipeline panel.
 
 Older binary Office formats such as `.doc`, `.xls`, and `.ppt`, plus all other unsupported file types, remain untouched in the incoming folder.
 
@@ -208,7 +208,7 @@ AI_MODE=heuristic
 
 - The top bar holds free-text search; the collapsible left sidebar filters by year, category, type, tags, and duplicate state (`Ctrl+B` toggles it; on small screens it opens as a drawer).
 - Without a selection, documents appear as a full-width thumbnail grid grouped by year. Opening a document switches to a compact list next to the preview (`Ctrl+E` toggles the preview, `Esc` closes it, arrow keys move between documents, `Enter` opens the focused one).
-- Thumbnails of the first PDF page are rendered on demand and cached in `cache/thumbs/` (override with `THUMB_DIR`).
+- Thumbnails of the first PDF page or image are rendered on demand and cached in `cache/thumbs/` (override with `THUMB_DIR`).
 - The detail view edits title, filename, year, summary, OCR text, and custom tags.
 - **Settings → Layout** chooses automatic (follows the system), light, or dark appearance.
 - Duplicate cards open a grid of all copies with per-copy removal.

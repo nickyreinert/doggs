@@ -1,5 +1,8 @@
 const state = { q: '', years: new Set(), categories: new Set(), types: new Set(), tags: new Set(), duplicates: false, demo: false, selected: null, requestedDocument: '', preview: false };
-let files = [], timer, availableYears = [], visibleTags = [], tagAliases = {}, activeSettingsTab = 'tags';
+let files = [], timer, availableYears = [], availableCategories = [], visibleTags = [], favoriteTags = [], recentTags = [], tagAliases = {}, activeSettingsTab = 'tags';
+// Ctrl/Shift-click builds a multi-selection that can be dragged onto a category or tag; `dragging` pauses background refreshes.
+const multi = new Set(), DRAG_TYPE = 'application/x-doggs-documents';
+let anchorId = null, dragging = false, toastTimer;
 const $ = id => document.getElementById(id);
 const root = document.documentElement;
 const THEME_KEY = 'doggs-theme', SIDEBAR_KEY = 'doggs-sidebar', LIST_WIDTH_KEY = 'doggs-list-width';
@@ -98,8 +101,11 @@ async function refresh() {
   if (!r.ok) return;
   const d = await r.json();
   availableYears = (d.years || []).map(i => i.value);
+  availableCategories = (d.categories || []).map(i => i.value);
+  favoriteTags = d.favorite_tags || [];
+  recentTags = d.recent_tags || [];
   renderFacet('years', d.years || [], state.years, 'All years');
-  renderFacet('categories', d.categories || [], state.categories, 'All categories');
+  renderFacet('categories', d.categories || [], state.categories, 'All categories', value => value, (ids, category) => bulkUpdate(ids, { category }, category));
   renderFacet('types', d.types || [], state.types, 'All', value => value.toUpperCase());
   renderTags(d.tags || []);
   $('duplicateCount').textContent = d.duplicates_count || 0;
@@ -111,15 +117,27 @@ async function refresh() {
       const load = !!state.requestedDocument;
       state.requestedDocument = '';
       selectFile(f, load, false);
-    } else {
+    } else if (!selectFirstFile()) {
       clearSelection(false);
       syncUrl();
     }
+  } else if (!selectFirstFile()) {
+    syncUrl();
   }
 }
 
+// Nothing (or something that vanished, like a deleted duplicate) is selected: fall back to the first document in the list.
+function selectFirstFile() {
+  const first = document.querySelector('#files .file');
+  const f = first && files.find(x => x.id === first.dataset.fileId);
+  if (!f) return false;
+  selectFile(f, true, false);
+  syncUrl();
+  return true;
+}
+
 // Clickable facet list replacing the old multi-select boxes: click toggles a value, "All" clears the facet.
-function renderFacet(id, items, selected, allLabel, format = value => value) {
+function renderFacet(id, items, selected, allLabel, format = value => value, onDrop = null) {
   const e = $(id), focusedValue = e.contains(document.activeElement) ? document.activeElement.dataset.value : null;
   e.innerHTML = '';
   const make = (value, label, count, active) => {
@@ -142,7 +160,10 @@ function renderFacet(id, items, selected, allLabel, format = value => value) {
     return b;
   };
   make('', allLabel, null, !selected.size);
-  items.forEach(i => make(i.value, format(i.value), i.count, selected.has(i.value)));
+  items.forEach(i => {
+    const b = make(i.value, format(i.value), i.count, selected.has(i.value));
+    if (onDrop) dropTarget(b, ids => onDrop(ids, i.value));
+  });
   if (focusedValue != null) e.querySelector('[data-value="' + CSS.escape(focusedValue) + '"]')?.focus();
 }
 
@@ -150,9 +171,11 @@ function renderTags(items) {
   visibleTags = items;
   const e = $('tags'), needle = $('tagSearch').value.trim().toLowerCase();
   e.innerHTML = '';
-  items.filter(i => !needle || i.value.includes(needle)).forEach(i => {
+  const rank = value => favoriteTags.includes(value) ? 0 : 1;
+  items.filter(i => !needle || i.value.includes(needle)).sort((a, b) => rank(a.value) - rank(b.value)).forEach(i => {
     const wrap = document.createElement('span');
     wrap.className = 'tag-facet';
+    dropTarget(wrap, ids => bulkUpdate(ids, { tag: i.value }, '#' + i.value));
     const filter = document.createElement('button');
     filter.className = 'chip' + (state.tags.has(i.value) ? ' selected' : '');
     filter.textContent = i.value;
@@ -174,7 +197,15 @@ function renderTags(items) {
     ignore.title = 'Ignore ' + i.value + ' everywhere';
     ignore.setAttribute('aria-label', 'Ignore ' + i.value + ' everywhere');
     ignore.onclick = () => ignoreTag(i.value);
-    wrap.append(filter, edit, ignore);
+    const star = document.createElement('button');
+    const favorite = favoriteTags.includes(i.value);
+    star.className = 'tag-star' + (favorite ? ' on' : '');
+    star.textContent = favorite ? '★' : '☆';
+    star.title = (favorite ? 'Remove ' : 'Add ') + i.value + (favorite ? ' from' : ' to') + ' favorite tags';
+    star.setAttribute('aria-label', star.title);
+    star.setAttribute('aria-pressed', String(favorite));
+    star.onclick = () => setFavoriteTag(i.value, !favorite);
+    wrap.append(filter, star, edit, ignore);
     e.append(wrap);
   });
   if (!e.children.length) e.innerHTML = '<div class="empty">No matching tags.</div>';
@@ -216,9 +247,11 @@ function renderFiles(list) {
 
 function fileCard(f) {
   const dupeCount = f.duplicate_count || 0;
-  const b = document.createElement('button');
-  b.type = 'button';
-  b.className = 'file' + (state.selected?.id === f.id ? ' active' : '');
+  const b = document.createElement('div');
+  b.setAttribute('role', 'button');
+  b.tabIndex = 0;
+  b.draggable = true;
+  b.className = 'file' + (state.selected?.id === f.id ? ' active' : '') + (multi.has(f.id) ? ' multi' : '');
   b.dataset.fileId = f.id;
   b.innerHTML = '<div class="thumb"><span class="type-label"></span></div><div class="body"><div class="title"></div><div class="meta"></div><div class="summary"></div></div>';
   b.querySelector('.type-label').textContent = f.type || 'file';
@@ -245,12 +278,135 @@ function fileCard(f) {
     badge.title = total + ' copies of this document (' + dupeCount + ' duplicate' + (dupeCount > 1 ? 's' : '') + ')';
     b.append(badge);
   }
-  b.onclick = () => dupeCount ? openDuplicates(f) : openFile(f);
+  b.onclick = e => {
+    if (e.ctrlKey || e.metaKey) { toggleMulti(f.id); return }
+    if (e.shiftKey && anchorId) { selectRange(anchorId, f.id); return }
+    clearMulti();
+    anchorId = f.id;
+    dupeCount ? openDuplicates(f) : openFile(f);
+  };
+  b.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); b.click() } };
+  b.ondragstart = e => {
+    const ids = multi.has(f.id) ? [...multi] : [f.id];
+    e.dataTransfer.setData(DRAG_TYPE, JSON.stringify(ids));
+    e.dataTransfer.setData('text/plain', ids.length + ' document' + (ids.length > 1 ? 's' : ''));
+    e.dataTransfer.effectAllowed = 'copy';
+    dragging = true;
+    document.querySelectorAll('#files .file').forEach(card => card.classList.toggle('dragging', ids.includes(card.dataset.fileId)));
+  };
+  b.ondragend = () => { dragging = false; document.querySelectorAll('.dragging').forEach(card => card.classList.remove('dragging')) };
   return b;
 }
 
 function markActiveFile() {
-  document.querySelectorAll('#files .file').forEach(card => card.classList.toggle('active', card.dataset.fileId === state.selected?.id));
+  document.querySelectorAll('#files .file').forEach(card => {
+    card.classList.toggle('active', card.dataset.fileId === state.selected?.id);
+    card.classList.toggle('multi', multi.has(card.dataset.fileId));
+  });
+  $('selectionBar').hidden = multi.size < 2;
+  $('selectionCount').textContent = multi.size + ' documents selected';
+}
+
+function toggleMulti(id) {
+  if (!multi.size && state.selected) multi.add(state.selected.id);
+  multi.has(id) ? multi.delete(id) : multi.add(id);
+  anchorId = id;
+  markActiveFile();
+  if (state.selected) renderQuickTags(state.selected);
+}
+
+function selectRange(fromId, toId) {
+  const ids = [...document.querySelectorAll('#files .file')].map(card => card.dataset.fileId);
+  const a = ids.indexOf(fromId), b = ids.indexOf(toId);
+  if (a < 0 || b < 0) return;
+  ids.slice(Math.min(a, b), Math.max(a, b) + 1).forEach(id => multi.add(id));
+  markActiveFile();
+  if (state.selected) renderQuickTags(state.selected);
+}
+
+function clearMulti() {
+  if (!multi.size) return;
+  multi.clear();
+  markActiveFile();
+  if (state.selected) renderQuickTags(state.selected);
+}
+
+function showToast(message) {
+  const e = $('toast');
+  e.textContent = message;
+  e.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { e.hidden = true }, 3500);
+}
+
+function dropTarget(el, onDrop) {
+  el.addEventListener('dragover', e => {
+    if (!e.dataTransfer.types.includes(DRAG_TYPE)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    el.classList.add('drop-over');
+  });
+  el.addEventListener('dragleave', e => { if (!el.contains(e.relatedTarget)) el.classList.remove('drop-over') });
+  el.addEventListener('drop', e => {
+    e.preventDefault();
+    el.classList.remove('drop-over');
+    dragging = false;
+    try { onDrop(JSON.parse(e.dataTransfer.getData(DRAG_TYPE))) } catch {}
+  });
+}
+
+// One request for any number of documents: used by drag and drop and by the quick tags.
+async function bulkUpdate(ids, change, label) {
+  if (!ids.length) return false;
+  const r = await fetch('/api/files/bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, ...change }) });
+  const noun = ids.length === 1 ? '1 document' : ids.length + ' documents';
+  showToast(r.ok ? (change.tag ? 'Tagged ' + noun + ' with ' + label : 'Moved ' + noun + ' to ' + label) : 'Could not update ' + noun + '.');
+  if (r.ok) await refresh();
+  return r.ok;
+}
+
+async function setFavoriteTag(tag, favorite) {
+  const r = await fetch('/api/tags/' + encodeURIComponent(tag) + '/favorite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ favorite }) });
+  if (r.ok) refresh();
+}
+
+// Favorites first, then the most recently assigned tags; clicking one adds it to the open document (or the whole multi-selection).
+function renderQuickTags(f) {
+  const e = $('quickTags'), assigned = new Set((f.document_tags || []).map(entry => entry.value));
+  const targets = multi.size > 1 ? [...multi] : [f.id];
+  e.innerHTML = '';
+  const groups = [['Favorites', favoriteTags], ['Latest', recentTags.filter(tag => !favoriteTags.includes(tag))]];
+  groups.forEach(([label, tags]) => {
+    if (!tags.length) return;
+    const group = document.createElement('div');
+    group.className = 'quick-tag-group';
+    const heading = document.createElement('span');
+    heading.className = 'document-tag-group-label';
+    heading.textContent = label + (multi.size > 1 ? ' · apply to ' + targets.length : '');
+    group.append(heading);
+    tags.forEach(tag => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'quick-tag';
+      b.textContent = (label === 'Favorites' ? '★ ' : '+ ') + tag;
+      const done = targets.length === 1 && assigned.has(tag);
+      b.disabled = done;
+      b.title = done ? 'Already on this document' : 'Add ' + tag + (targets.length > 1 ? ' to ' + targets.length + ' documents' : ' to this document');
+      b.onclick = () => bulkUpdate(targets, { tag }, '#' + tag);
+      group.append(b);
+    });
+    e.append(group);
+  });
+  if (!e.children.length) e.innerHTML = '<span class="meta">Star a tag in the sidebar to keep it here for one-click tagging.</span>';
+  e.hidden = false;
+}
+
+async function moveDocumentCategory() {
+  if (!state.selected) return;
+  const category = $('categoryInput').value;
+  const r = await fetch('/api/file/' + encodeURIComponent(state.selected.id), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ category }) });
+  $('editorStatus').textContent = r.ok ? 'Category set to ' + (category || 'none') + '.' : 'Could not change the category.';
+  if (r.ok) refresh();
 }
 
 function openFile(f) {
@@ -334,7 +490,7 @@ function selectFile(f, load = true, updateUrl = true) {
   state.requestedDocument = '';
   $('detailsEditor').hidden = false;
   $('editorActions').hidden = false;
-  const isPdf = f.name.toLowerCase().endsWith('.pdf');
+  const isPdf = /\.(pdf|png|jpe?g|tiff?|bmp|webp|gif)$/i.test(f.name);  // formats the OCR button can read
   $('openOriginal').href = f.url;
   $('runOcr').hidden = !isPdf;
   $('allPages').closest('label').hidden = !isPdf;
@@ -358,7 +514,11 @@ function selectFile(f, load = true, updateUrl = true) {
   $('yearInput').value = f.year;
   $('yearInput').disabled = !!f.is_duplicate;
   $('yearInput').title = f.is_duplicate ? 'Duplicate copies are stored together and are not organized by year. Edit the original document to move it.' : '';
+  const categories = [...new Set([...availableCategories, f.category].filter(Boolean))];
+  $('categoryInput').replaceChildren(new Option('None', ''), ...categories.map(c => new Option(c, c)));
+  $('categoryInput').value = f.category || '';
   renderDocumentTags(f.document_tags || []);
+  renderQuickTags(f);
   $('editorStatus').textContent = ['queued', 'running'].includes(f.normal_scan?.state) ? 'LLM extraction is running…' : f.normal_scan?.state === 'error' ? f.normal_scan.error : '';
   if (load) loadFrame();
   loadMetadata(f.id);
@@ -567,7 +727,8 @@ async function refreshStatus() {
       entries.unshift(...rescanEntries);
     }
     $('pipelineList').innerHTML = entries.length ? entries.join('') : '<li>No PDFs waiting in the inbox.</li>';
-    $('pipelineError').textContent = rescan.error || p.last_error || '';
+    const unsupported = p.unsupported || [];
+    $('pipelineError').textContent = rescan.error || p.last_error || (unsupported.length ? 'Unsupported files left in the incoming folder: ' + unsupported.slice(0, 5).join(', ') + (unsupported.length > 5 ? ' …' : '') : '');
   } catch {
     $('ollamaStatus').textContent = 'Status unavailable';
   }
@@ -870,6 +1031,8 @@ $('cleanDuplicatesButton').onclick = async () => {
 };
 $('saveDetails').onclick = saveDetails;
 $('yearInput').onchange = moveDocumentYear;
+$('categoryInput').onchange = moveDocumentCategory;
+$('clearMulti').onclick = clearMulti;
 $('runOcr').onclick = runOcr;
 $('runLlm').onclick = rerunPipeline;
 $('saveOcr').onclick = saveOcr;
@@ -952,11 +1115,12 @@ document.addEventListener('keydown', event => {
   if (event.ctrlKey || event.metaKey || event.altKey) return;
   const typing = event.target.closest('input, textarea, select, [contenteditable="true"]');
   if (key === 'escape' && !typing) {
+    if (multi.size) { clearMulti(); return }
     if (isNarrow() && !root.classList.contains('sidebar-closed')) setSidebar(false);
     else if (state.preview) setPreview(false);
     return;
   }
-  if (key === 'enter' && !typing && !state.preview && state.selected && !event.target.closest('button, a')) {
+  if (key === 'enter' && !typing && !state.preview && state.selected && !event.target.closest('button, a, [role="button"]')) {
     event.preventDefault();
     openFile(state.selected);
     return;
@@ -995,4 +1159,4 @@ refresh();
 refreshStatus();
 checkFirstRunSetup();
 window.addEventListener('popstate', () => { restoreUrlState(); refresh() });
-setInterval(() => { refresh(); refreshStatus() }, 15000);
+setInterval(() => { if (!dragging) refresh(); refreshStatus() }, 15000);

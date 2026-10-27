@@ -30,7 +30,7 @@ from openpyxl import load_workbook
 from odf import teletype
 from odf.opendocument import load as load_odf
 from odf.text import H, P
-from PIL import Image
+from PIL import Image, ImageOps
 from pptx import Presentation
 from dotenv import load_dotenv
 
@@ -69,7 +69,9 @@ TEXT_FORMATS = {
     ".csv", ".epub", ".htm", ".html", ".ini", ".json", ".log", ".md", ".odp", ".ods", ".odt",
     ".pptx", ".rtf", ".tex", ".tsv", ".txt", ".xml", ".yaml", ".yml", ".docx", ".xlsx",
 }
-SUPPORTED_FORMATS = {".pdf", *TEXT_FORMATS}
+# Scanned pages and photos: read with OCR instead of a text layer.
+IMAGE_FORMATS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gif"}
+SUPPORTED_FORMATS = {".pdf", *TEXT_FORMATS, *IMAGE_FORMATS}
 LLM_SOURCE_LINES = int(os.getenv("LLM_SOURCE_LINES", "80"))
 DEFAULT_CATEGORIES = ["financial-document", "invoice", "incoming", "outgoing", "banking", "tax-office", "insurance", "contract", "personal", "misc"]
 FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "category", "rule_name", "rule_reason", "summary", "tokens", "removed_tags", "tags", "ocr_text", "is_duplicate", "duplicate_of", "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer", "source", "created_at"]
@@ -85,7 +87,7 @@ if CSV_PATH.exists() and CSV_PATH.is_dir():
 app, CSV_LOCK, SCAN_LOCK = Flask(__name__), threading.RLock(), threading.Lock()
 WORKER_STARTED = False
 STATUS_CACHE = {"checked_at": 0.0, "payload": None}
-PIPELINE_STATE = {"processing": "", "last_scan": "", "last_error": "", "processed": 0, "paused": False}
+PIPELINE_STATE = {"processing": "", "last_scan": "", "last_error": "", "unsupported": [], "processed": 0, "paused": False}
 FULL_SCAN_STATE = {}
 OCR_SCAN_STATE = {}
 NORMAL_SCAN_STATE = {}
@@ -211,7 +213,16 @@ def read_settings():
     rules = [normalize_rule(rule) for rule in data.get("rules", []) if isinstance(rule, dict)]
     external_api = data.get("external_api") if isinstance(data.get("external_api"), dict) else {}
     share_url = str(external_api.get("smb_share_url") or "").strip().rstrip("/")
-    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "tag_aliases": aliases, "categories": categories, "rules": rules, "external_api": {"port": PORT, "token_configured": bool(EXTERNAL_API_TOKEN), "smb_share_url": share_url}, "general": general, "general_configured": general_is_configured(raw_general), "general_locked": general_locked_fields(), "prompts": {"metadata": metadata_prompt, "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
+    favorite_tags = list(dict.fromkeys(slugify(tag) for tag in tag_values(data.get("favorite_tags", [])) if slugify(tag) != "document"))
+    recent_tags = list(dict.fromkeys(slugify(tag) for tag in tag_values(data.get("recent_tags", [])) if slugify(tag) != "document"))[:MAX_RECENT_TAGS]
+    return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "favorite_tags": favorite_tags, "recent_tags": recent_tags, "tag_aliases": aliases, "categories": categories, "rules": rules, "external_api": {"port": PORT, "token_configured": bool(EXTERNAL_API_TOKEN), "smb_share_url": share_url}, "general": general, "general_configured": general_is_configured(raw_general), "general_locked": general_locked_fields(), "prompts": {"metadata": metadata_prompt, "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
+
+MAX_RECENT_TAGS = 12
+
+def remember_recent_tags(tags):
+    settings = read_settings()
+    settings["recent_tags"] = list(dict.fromkeys(list(tags) + settings["recent_tags"]))[:MAX_RECENT_TAGS]
+    write_settings(settings)
 
 def write_settings(settings):
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -399,9 +410,23 @@ def extract_normal_text(path):
         return re.sub(r"\s+", " ", text).strip()[:MAX_SOURCE_CHARS], source
     finally: doc.close()
 
+def image_pages(path, limit):
+    """Yield up to `limit` RGB frames of an image file (multi-page TIFFs have several)."""
+    with Image.open(path) as image:
+        for index in range(min(getattr(image, "n_frames", 1), limit)):
+            image.seek(index)
+            yield ImageOps.exif_transpose(image).convert("RGB")
+
+def ocr_image_text(path, limit):
+    return "\n".join(pytesseract.image_to_string(frame, lang=OCR_LANG) for frame in image_pages(path, limit))
+
 def extract_text_document(path):
     """Extract readable text from supported non-PDF formats without altering their bytes."""
     suffix = path.suffix.lower()
+    if suffix in IMAGE_FORMATS:
+        text = ocr_image_text(path, HEAD_PAGES)
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return "\n".join(lines[-LLM_SOURCE_LINES:])[:MAX_FULL_TEXT_CHARS], "ocr"
     if suffix in {".txt", ".md", ".log", ".ini", ".yaml", ".yml", ".tex", ".rtf"}:
         text = path.read_text(encoding="utf-8", errors="replace")
         if suffix == ".rtf":
@@ -631,6 +656,8 @@ def ai_summary(text):
         log.warning("Ollama full-document summary failed."); return ""
 
 def ocr_text(path, all_pages=False):
+    if path.suffix.lower() in IMAGE_FORMATS:
+        return re.sub(r"\s+", " ", ocr_image_text(path, 1000 if all_pages else 1)).strip()[:MAX_FULL_TEXT_CHARS]
     parts = []
     with fitz.open(path) as doc:
         for index in range(len(doc) if all_pages else min(len(doc), 1)):
@@ -850,7 +877,12 @@ def scan_incoming():
         reconcile_archive_locations()
         managed_dirs = (ARCHIVE_DIR, ERROR_DIR, DUPLICATE_DIR, TRASH_DIR)
         source_paths = INCOMING_DIR.rglob("*") if RECURSIVE_SCAN else INCOMING_DIR.iterdir()
-        candidates = sorted((p for p in source_paths if p.is_file() and p.suffix.lower() in SUPPORTED_FORMATS and not any(is_within(directory, p) for directory in managed_dirs)), key=lambda p: p.stat().st_mtime)
+        incoming = [p for p in source_paths if p.is_file() and not p.name.startswith(".") and not any(is_within(directory, p) for directory in managed_dirs)]
+        candidates = sorted((p for p in incoming if p.suffix.lower() in SUPPORTED_FORMATS), key=lambda p: p.stat().st_mtime)
+        # Files of other types are left in place; surface them so they don't look like they were silently lost.
+        skipped = sorted(p.name for p in incoming if p.suffix.lower() not in SUPPORTED_FORMATS)
+        if skipped: log.warning("Skipping %d unsupported file(s) in the incoming folder: %s", len(skipped), ", ".join(skipped[:10]))
+        PIPELINE_STATE["unsupported"] = skipped
         for path in candidates:
             if PIPELINE_STATE["paused"]:
                 break
@@ -926,7 +958,7 @@ def duplicate_counts_by_original(rows):
 def serialize_row(row, duplicate_counts=None):
     duplicate_count = (duplicate_counts or {}).get(duplicate_group_id(row), 0)
     document_type = Path(row.get("stored_path", row.get("original_name", ""))).suffix.lower().removeprefix(".") or "unknown"
-    thumb_url = f"/thumb?id={quote(row.get('id', ''))}&v={quote(row.get('file_hash', '')[:16])}" if document_type == "pdf" else ""
+    thumb_url = f"/thumb?id={quote(row.get('id', ''))}&v={quote(row.get('file_hash', '')[:16])}" if document_type == "pdf" or f".{document_type}" in IMAGE_FORMATS else ""
     return {**row, "name": Path(row.get("stored_path", "")).name, "type": document_type, "document_tags": document_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "thumb_url": thumb_url, "duplicate_count": duplicate_count, "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "ocr_scan": OCR_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})}
 
 def demo_document_rows():
@@ -1008,7 +1040,7 @@ def api_index():
     category_counts = Counter(row.get("category") for row in category_rows if row.get("category"))
     category_values = list(dict.fromkeys(read_settings()["categories"] + sorted(category_counts)))
     type_counts = Counter(document_type(row) for row in type_rows)
-    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "categories": [{"value": value, "count": category_counts[value], "selected": value in categories} for value in category_values], "types": [{"value": value, "count": count, "selected": value in types} for value, count in sorted(type_counts.items())], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "files": [serializer(row, duplicate_counts) for row in files], "selected_file": serializer(selected_row, duplicate_counts) if selected_row else None})
+    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "categories": [{"value": value, "count": category_counts[value], "selected": value in categories} for value in category_values], "types": [{"value": value, "count": count, "selected": value in types} for value, count in sorted(type_counts.items())], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "favorite_tags": read_settings()["favorite_tags"], "recent_tags": read_settings()["recent_tags"], "files": [serializer(row, duplicate_counts) for row in files], "selected_file": serializer(selected_row, duplicate_counts) if selected_row else None})
 
 @app.get("/api/external/v1/catalog")
 def external_catalog():
@@ -1060,6 +1092,10 @@ def update_file(row_id):
     if not row: abort(404)
     if "tags" in payload:
         row["tags"] = " ".join(dict.fromkeys(slugify(tag) for tag in re.split(r"[\s,]+", str(payload["tags"])) if tag and slugify(tag) != "document"))
+    if "category" in payload:
+        category = str(payload["category"] or "").strip()
+        if category and category != row.get("category") and category not in read_settings()["categories"]: abort(400, "Unknown category.")
+        row["category"] = category
     if "title" in payload: row["pdf_title"] = re.sub(r"\s+", " ", str(payload["title"])).strip()[:500]
     if "summary" in payload: row["summary"] = str(payload["summary"]).strip()[:4000]
     if "year" in payload or "filename" in payload:
@@ -1138,7 +1174,37 @@ def add_file_tag(row_id):
     if not row: abort(404)
     row["tags"] = " ".join(dict.fromkeys(custom_tags(row) + [tag]))
     write_rows(rows)
+    remember_recent_tags([tag])
     return jsonify({"ok": True, "tags": document_tags(row)})
+
+@app.post("/api/tags/<tag>/favorite")
+def set_favorite_tag(tag):
+    tag = slugify(tag)
+    if tag == "document": abort(400, "Enter a tag.")
+    favorite = bool((request.get_json(silent=True) or {}).get("favorite", True))
+    settings = read_settings()
+    settings["favorite_tags"] = [value for value in settings["favorite_tags"] if value != tag] + ([tag] if favorite else [])
+    write_settings(settings)
+    return jsonify({"ok": True, "favorite_tags": settings["favorite_tags"]})
+
+@app.post("/api/files/bulk")
+def bulk_update_files():
+    """Apply one change (add a tag and/or set the category) to several documents, e.g. after a drag and drop."""
+    payload = request.get_json(silent=True) or {}
+    ids = {str(value) for value in payload.get("ids", []) if value}
+    tag = slugify(str(payload["tag"])) if payload.get("tag") else ""
+    category = str(payload.get("category") or "").strip()
+    if not ids or not (tag or category) or tag == "document": abort(400, "Choose documents and a tag or category.")
+    if category and category not in read_settings()["categories"]: abort(400, "Unknown category.")
+    rows = read_rows(); changed = [row for row in rows if row.get("id") in ids]
+    if not changed: abort(404)
+    for row in changed:
+        if tag: row["tags"] = " ".join(dict.fromkeys(custom_tags(row) + [tag]))
+        if category: row["category"] = category
+    write_rows(rows)
+    if tag: remember_recent_tags([tag])
+    STATUS_CACHE["payload"] = None
+    return jsonify({"ok": True, "updated": len(changed)})
 
 @app.delete("/api/file/<row_id>/tags/<tag>")
 def remove_file_tag(row_id, tag):
@@ -1328,6 +1394,11 @@ def render_thumbnail(open_document):
     buffer = BytesIO(); Image.frombytes("RGB", [pix.width, pix.height], pix.samples).save(buffer, "JPEG", quality=72, optimize=True)
     return buffer.getvalue()
 
+def render_image_thumbnail(path):
+    frame = next(image_pages(path, 1)); frame.thumbnail((THUMB_WIDTH, THUMB_WIDTH * 2))
+    buffer = BytesIO(); frame.save(buffer, "JPEG", quality=72, optimize=True)
+    return buffer.getvalue()
+
 @app.route("/thumb")
 def serve_thumbnail():
     """First-page JPEG preview for the document grid, cached on disk by content hash."""
@@ -1339,11 +1410,11 @@ def serve_thumbnail():
     if not row: abort(404)
     full_path = file_path_for_row(row); base = DUPLICATE_DIR if row.get("location") == "duplicates" else ARCHIVE_DIR
     if not is_within(base, full_path): abort(403)
-    if not full_path.is_file() or full_path.suffix.lower() != ".pdf": abort(404)
+    if not full_path.is_file() or full_path.suffix.lower() not in {".pdf", *IMAGE_FORMATS}: abort(404)
     cache_key = re.sub(r"[^0-9a-f]", "", row.get("file_hash", "").lower()) or hashlib.sha256(str(full_path).encode()).hexdigest()
     cache_path = THUMB_DIR / f"{cache_key}-{THUMB_WIDTH}.jpg"
     if not cache_path.is_file():
-        try: data = render_thumbnail(lambda: fitz.open(full_path))
+        try: data = render_image_thumbnail(full_path) if full_path.suffix.lower() in IMAGE_FORMATS else render_thumbnail(lambda: fitz.open(full_path))
         except Exception:
             log.warning("Could not render thumbnail for %s", full_path); abort(404)
         if not data: abort(404)
