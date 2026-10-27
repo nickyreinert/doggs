@@ -5,136 +5,150 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>DOGGS</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ctext y='51' font-size='36'%3E🐶🐶%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v=asset_version('css/app.css')) }}">
   <script>
     try {
       var t = localStorage.getItem('doggs-theme');
-      if (t && t !== 'classic') document.documentElement.dataset.theme = t;
+      if (t === 'midnight') t = 'dark';
+      if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+      if (localStorage.getItem('doggs-sidebar') === 'closed') document.documentElement.classList.add('sidebar-closed');
     } catch (e) {}
   </script>
 </head>
 <body>
-  <header id="appHeader">
-    <div class="brand">
-    <span class="brand-logo">🐶🐶</span>
-    <span>DOGGS</span>
-    <span class="brand-subtitle">local document archive</span>
+<header class="topbar" id="appHeader">
+  <button type="button" class="icon-button" id="sidebarToggle" title="Toggle filters (Ctrl+B)" aria-label="Toggle filters" aria-controls="sidebar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <div class="brand"><span class="brand-logo">🐶🐶</span><span class="brand-name">DOGGS</span></div>
+  <label class="search" for="query">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+    <input id="query" type="search" placeholder="Search filename, date, summary…" autocomplete="off">
+    <kbd>Ctrl Q</kbd>
+  </label>
+  <span class="result-count" id="resultCount"></span>
+  <div class="topbar-actions">
+    <button type="button" class="icon-button" id="previewToggle" title="Toggle preview (Ctrl+E)" aria-label="Toggle preview" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M14 4v16"/></svg></button>
+    <button type="button" class="icon-button" id="settingsButton" title="Settings (Ctrl+S)" aria-label="Settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
   </div>
-  <div class="header-grid">
-    <section class="year-panel">
-      <label for="years">Years <span class="shortcut-hint">Ctrl+Y</span></label>
-      <select id="years" multiple size="5"></select>
-    </section>
-    <section class="category-panel">
-      <label for="categories">Categories <span class="shortcut-hint">Ctrl+W</span></label>
-      <select id="categories" multiple size="5"></select>
-    </section>
-    <section class="type-panel">
-      <label for="types">Document type</label>
-      <select id="types" multiple size="5"></select>
-    </section>
-    <section class="search-panel">
-      <label class="quick-label" for="query">Quick search <span class="shortcut-hint">Ctrl+Q</span></label>
-      <input id="query" type="search" placeholder="Filename, date, classification…">
-      <label class="duplicates">
-        <input id="duplicates" type="checkbox"> Duplicates only <span class="shortcut-hint">Ctrl+Shift+D</span> <span class="count" id="duplicateCount">0</span>
-      </label>
-      <button type="button" class="action" id="cleanDuplicatesButton" hidden>Clean Duplicates</button>
-      <button type="button" class="action" id="resetFilters">Reset filters</button>
-    </section>
-    <section class="tag-panel">
-      <label for="tagSearch">Filter tags <span class="shortcut-hint">Ctrl+F</span></label>
-      <div class="tag-row">
-        <input id="tagSearch" class="tag-search" type="search" placeholder="Filter tags…">
-        <div class="chips" id="tags"></div>
-      </div>
-    </section>
-  </div>
-  <div class="header-resizer" id="headerResizer" title="Drag to resize header"></div>
 </header>
-<main>
-  <aside id="files"></aside>
-  <section id="preview">
-    <div class="preview-head">
-      <div class="preview-head-top">
+<div class="shell">
+  <aside class="sidebar" id="sidebar" aria-label="Filters">
+    <div class="sidebar-head">
+      <span>Filters</span>
+      <button type="button" class="link-button" id="resetFilters">Reset all</button>
+    </div>
+    <section class="facet">
+      <h4 id="yearsLabel">Year <kbd>Ctrl Y</kbd></h4>
+      <div class="facet-list" id="years" role="group" aria-labelledby="yearsLabel"></div>
+    </section>
+    <section class="facet">
+      <h4 id="categoriesLabel">Category <kbd>Ctrl W</kbd></h4>
+      <div class="facet-list" id="categories" role="group" aria-labelledby="categoriesLabel"></div>
+    </section>
+    <section class="facet">
+      <h4 id="typesLabel">Type</h4>
+      <div class="facet-list facet-inline" id="types" role="group" aria-labelledby="typesLabel"></div>
+    </section>
+    <section class="facet">
+      <label class="toggle-row" for="duplicates">
+        <input id="duplicates" type="checkbox" role="switch">
+        <span class="toggle-track" aria-hidden="true"></span>
+        <span class="toggle-label">Duplicates only</span>
+        <span class="count" id="duplicateCount">0</span>
+      </label>
+      <button type="button" class="button danger-soft small" id="cleanDuplicatesButton" hidden>Remove all duplicate copies</button>
+    </section>
+    <section class="facet facet-tags">
+      <h4>Tags <kbd>Ctrl F</kbd></h4>
+      <input id="tagSearch" class="tag-search" type="search" placeholder="Find a tag…" autocomplete="off">
+      <div class="tag-cloud" id="tags"></div>
+    </section>
+  </aside>
+  <div class="sidebar-scrim" id="sidebarScrim"></div>
+  <main class="workspace" id="workspace">
+    <section class="browser" id="files" aria-label="Documents"></section>
+    <div class="splitter" id="splitter" role="separator" aria-orientation="vertical" title="Drag to resize"></div>
+    <section class="preview" id="preview" aria-label="Document preview">
+      <div class="preview-head">
         <div class="preview-head-info">
-          <div class="document-title" id="documentTitle" contenteditable="true" role="textbox" aria-label="Document title">Select a document</div>
+          <div class="document-title" id="documentTitle" contenteditable="true" role="textbox" aria-label="Document title" spellcheck="false">Select a document</div>
           <div class="document-meta" id="documentMeta">Its details and preview will appear here.</div>
           <span class="rule-badge" id="ruleMatchBadge" hidden></span>
         </div>
-        <div class="editor-actions" id="editorActions" hidden>
-          <button class="action" id="saveDetails">Save details</button>
-          <button class="action" id="runOcr">Run OCR</button>
-          <label class="all-pages"><input id="allPages" type="checkbox"> All pages</label>
-          <button class="action" id="runLlm">Run LLM extraction</button>
-          <button class="action" id="saveOcr">Save OCR text</button>
+        <div class="preview-head-actions">
+          <div class="editor-actions" id="editorActions" hidden>
+            <button type="button" class="button primary" id="saveDetails">Save</button>
+            <button type="button" class="button" id="runLlm" title="Re-run LLM extraction for this document"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/></svg><span>Re-extract</span></button>
+            <a class="icon-button" id="openOriginal" target="_blank" rel="noopener" title="Open original in a new tab" aria-label="Open original in a new tab"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a>
+          </div>
+          <button type="button" class="icon-button" id="closePreview" title="Close preview (Esc)" aria-label="Close preview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
         </div>
       </div>
-      <div id="detailsEditor" hidden>
-        <details class="collapsible" id="detailsSection" open>
-          <summary>Details <span class="shortcut-hint">Ctrl+D</span></summary>
-          <div class="editor-grid">
-            <div class="file-fields">
-              <div class="editor">
-                <label>Folder</label>
+      <div class="preview-body" id="previewBody">
+        <div class="viewer"><iframe id="frame" title="Document preview"></iframe></div>
+        <div class="inspector" id="detailsEditor" hidden>
+          <details class="collapsible" id="detailsSection" open>
+            <summary>Details <kbd>Ctrl D</kbd></summary>
+            <div class="editor-grid">
+              <label class="field">
+                <span>Folder</span>
                 <select id="yearInput"></select>
-              </div>
-              <div class="editor filename">
-                <label>Filename</label>
-                <input id="filenameInput">
+              </label>
+              <label class="field">
+                <span>Filename</span>
+                <input id="filenameInput" spellcheck="false">
+              </label>
+              <label class="field">
+                <span>Summary</span>
+                <textarea id="summaryInput" rows="4"></textarea>
+              </label>
+              <div class="field file-tags">
+                <span>Tags <kbd>Ctrl T</kbd></span>
+                <div class="document-tags">
+                  <div id="documentTags"></div>
+                  <input id="tagInput" class="document-tag-input" placeholder="Add tag and press Enter">
+                </div>
               </div>
             </div>
-            <div class="editor">
-              <label>Summary</label>
-              <textarea id="summaryInput"></textarea>
-            </div>
-            <div class="editor file-tags">
-              <span class="inferred-label">Document tags <span class="shortcut-hint">Ctrl+T</span></span>
-              <div class="document-tags">
-                <div id="documentTags"></div>
-                <input id="tagInput" class="document-tag-input" placeholder="Add tag + Enter">
+          </details>
+          <details class="collapsible" id="metaSection">
+            <summary>Metadata &amp; OCR <kbd>Ctrl M</kbd></summary>
+            <section class="meta-panel" id="metaPanel">
+              <div class="meta-values" id="metaValues"></div>
+              <div class="ocr-actions">
+                <button type="button" class="button small" id="runOcr"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M7 12h10"/></svg><span>Run OCR</span></button>
+                <label class="check"><input id="allPages" type="checkbox"> All pages</label>
+                <button type="button" class="button small" id="saveOcr">Save OCR text</button>
               </div>
-            </div>
-          </div>
-        </details>
-        <details class="collapsible" id="metaSection">
-          <summary>Metadata &amp; OCR <span class="shortcut-hint">Ctrl+M</span></summary>
-          <section class="meta-panel" id="metaPanel">
-            <div class="meta-values" id="metaValues"></div>
-            <label class="editor" for="ocrText">OCR text</label>
-            <textarea id="ocrText" placeholder="Run OCR or paste corrected text here."></textarea>
-          </section>
-        </details>
-        <div class="editor-status" id="editorStatus"></div>
+              <textarea id="ocrText" placeholder="Run OCR or paste corrected text here." aria-label="OCR text"></textarea>
+            </section>
+          </details>
+          <div class="editor-status" id="editorStatus" role="status"></div>
+        </div>
       </div>
-    </div>
-    <iframe id="frame" title="Document preview"></iframe>
-    <div id="duplicatesView">
-      <div class="dupes-head">
-        <span class="meta">Click the bin icon on a copy to remove it.</span>
-        <button class="icon-button" id="closeDuplicatesButton" title="Close duplicates view" aria-label="Close duplicates view">✕</button>
+      <div id="duplicatesView">
+        <div class="dupes-head">
+          <span class="meta">Use the bin button on a copy to remove it.</span>
+        </div>
+        <div class="dupes-grid" id="duplicatesGrid"></div>
       </div>
-      <div class="dupes-grid" id="duplicatesGrid"></div>
-    </div>
-  </section>
-</main>
-<footer>
+      <button type="button" hidden id="closeDuplicatesButton" aria-hidden="true" tabindex="-1"></button>
+    </section>
+  </main>
+</div>
+<footer class="statusbar">
   <div class="footer-bar">
-    <span><span class="dot" id="ollamaDot"></span> <span id="ollamaStatus">Checking Ollama…</span></span>
-    <span id="modelStatus"></span>
+    <span class="status-item"><span class="dot" id="ollamaDot"></span><span id="ollamaStatus">Checking Ollama…</span></span>
+    <span class="status-item muted" id="modelStatus"></span>
+    <button type="button" class="status-item status-pipeline" id="pipelineSummary" title="Show pipeline (Ctrl+Space)"><span id="pipelineCount">Pipeline</span></button>
     <div class="footer-actions">
-      <button class="icon-button" id="settingsButton" title="Settings (Ctrl+S)" aria-label="Settings (Ctrl+S)">⚙ <span class="shortcut-hint">Ctrl+S</span></button>
-      <button class="scan-button" id="scanNow">Re-Scan all <span class="shortcut-hint">Ctrl+R</span></button>
-      <button class="scan-button" id="stopScan" hidden>Stop Scan <span class="shortcut-hint">Ctrl+Shift+S</span></button>
-      <button class="scan-button" id="pausePipeline">Pause pipeline <span class="shortcut-hint">Ctrl+P</span></button>
-      <button class="footer-toggle" id="pipelineToggle" title="Expand pipeline (Ctrl+Space)" aria-label="Expand pipeline (Ctrl+Space)">⌃ <span class="shortcut-hint">Ctrl+Space</span></button>
+      <button type="button" class="button ghost small" id="scanNow" title="Re-scan all documents (Ctrl+R)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg><span>Re-scan all</span></button>
+      <button type="button" class="button ghost small" id="stopScan" hidden title="Stop the re-scan (Ctrl+Shift+S)"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1"/></svg><span>Stop scan</span></button>
+      <button type="button" class="button ghost small" id="pausePipeline" title="Pause or resume the pipeline (Ctrl+P)">Pause pipeline</button>
+      <button type="button" class="icon-button small" id="pipelineToggle" title="Expand pipeline (Ctrl+Space)" aria-label="Expand pipeline"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg></button>
     </div>
   </div>
   <div class="pipeline" id="pipeline">
-    <div class="pipeline-head">
-      <span id="pipelineCount">Pipeline</span>
-      <span id="ocrStatus"></span>
-    </div>
+    <div class="pipeline-head"><span id="ocrStatus"></span></div>
     <ul class="pipeline-list" id="pipelineList"></ul>
     <div class="pipeline-error" id="pipelineError"></div>
   </div>
@@ -231,28 +245,23 @@
     </div>
   </section>
   <section class="settings-pane" data-pane="layout" hidden>
-    <p>Pick a look for this browser. Choices are saved locally on this device only.</p>
-    <h3 class="settings-subhead">Color theme</h3>
+    <p>Pick the appearance for this browser. The choice is saved on this device only.</p>
+    <h3 class="settings-subhead">Appearance</h3>
     <div class="theme-grid" id="themeGrid">
-      <button type="button" class="theme-card" data-theme-choice="classic">
-        <span class="theme-swatch theme-swatch-classic"></span>
-        <span class="theme-name">Classic</span>
-        <span class="theme-desc">The current compact, light layout.</span>
+      <button type="button" class="theme-card" data-theme-choice="auto">
+        <span class="theme-swatch theme-swatch-auto"></span>
+        <span class="theme-name">Automatic</span>
+        <span class="theme-desc">Follows your system's light or dark mode.</span>
       </button>
-      <button type="button" class="theme-card" data-theme-choice="midnight">
-        <span class="theme-swatch theme-swatch-midnight"></span>
-        <span class="theme-name">Midnight</span>
-        <span class="theme-desc">Dark surfaces, easy on the eyes.</span>
+      <button type="button" class="theme-card" data-theme-choice="light">
+        <span class="theme-swatch theme-swatch-light"></span>
+        <span class="theme-name">Light</span>
+        <span class="theme-desc">Always light.</span>
       </button>
-      <button type="button" class="theme-card" data-theme-choice="paper">
-        <span class="theme-swatch theme-swatch-paper"></span>
-        <span class="theme-name">Paper</span>
-        <span class="theme-desc">Warm tones, soft rounded corners.</span>
-      </button>
-      <button type="button" class="theme-card" data-theme-choice="aurora">
-        <span class="theme-swatch theme-swatch-aurora"></span>
-        <span class="theme-name">Aurora</span>
-        <span class="theme-desc">Rounded cards, indigo accent, soft shadows.</span>
+      <button type="button" class="theme-card" data-theme-choice="dark">
+        <span class="theme-swatch theme-swatch-dark"></span>
+        <span class="theme-name">Dark</span>
+        <span class="theme-desc">Always dark.</span>
       </button>
     </div>
   </section>
@@ -262,6 +271,6 @@
   </div>
 </form>
 </dialog>
-<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<script src="{{ url_for('static', filename='js/app.js', v=asset_version('js/app.js')) }}"></script>
 </body>
 </html>

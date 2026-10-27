@@ -49,6 +49,8 @@ SETTINGS_PATH = configured_path("SETTINGS_PATH", DATA_DIR / "settings.json")
 ERROR_DIR = configured_path("ERROR_DIR", BASE_DIR / "errors")
 DUPLICATE_DIR = configured_path("DUPLICATE_DIR", BASE_DIR / "duplicates")
 TRASH_DIR = configured_path("TRASH_DIR", BASE_DIR / "trash")
+THUMB_DIR = configured_path("THUMB_DIR", BASE_DIR / "cache" / "thumbs")
+THUMB_WIDTH = 360
 HOST, PORT = os.getenv("HOST", "0.0.0.0"), int(os.getenv("PORT", "8383"))
 EXTERNAL_API_TOKEN = os.getenv("EXTERNAL_API_TOKEN", "").strip()
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "300"))
@@ -781,9 +783,36 @@ def process_file(path):
     rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "category": category, "rule_name": rule_name, "rule_reason": rule_reason, "summary": (heuristics["summary"] if heuristics["classification"] == "invoice" else ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(inferred), "removed_tags": "", "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
     write_rows(rows); log.info("Archived %s", destination)
 
+def promote_orphaned_duplicates(rows):
+    """Turn the oldest copy of each duplicate group whose original is gone into the new archived original."""
+    ids = {row.get("id") for row in rows}; groups = {}
+    for row in rows:
+        if row.get("is_duplicate") and row.get("duplicate_of") and row.get("duplicate_of") not in ids:
+            groups.setdefault(row["duplicate_of"], []).append(row)
+    changed = False
+    for old_original_id, copies in groups.items():
+        promoted = min(copies, key=lambda item: item.get("created_at", ""))
+        current_path = file_path_for_row(promoted)
+        if not current_path.is_file():
+            log.warning("Cannot promote missing duplicate: %s", current_path)
+            continue
+        year = str(promoted.get("year", "")).strip()
+        if not re.fullmatch(r"\d{4}", year):
+            parsed_date = parse_any_date(promoted.get("date"))
+            year = str(parsed_date.year if parsed_date else datetime.now(UTC).year)
+        destination = unique_path(ARCHIVE_DIR / year / current_path.name)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(current_path), destination)
+        promoted.update(year=year, location="archive", stored_path=destination.relative_to(ARCHIVE_DIR).as_posix(), is_duplicate="", duplicate_of="")
+        for item in copies:
+            if item is not promoted: item["duplicate_of"] = promoted["id"]
+        changed = True
+        log.info("Promoted duplicate %s to original (previous original %s no longer indexed)", destination, old_original_id)
+    return changed
+
 def reconcile_archive_locations():
     """Move indexed documents into the year directory recorded in the index."""
-    rows = read_rows(); changed = False
+    rows = read_rows(); changed = promote_orphaned_duplicates(rows)
     for row in rows:
         if row.get("location") == "duplicates":
             continue
@@ -884,15 +913,21 @@ def external_document(row):
     """Return the intentionally limited document representation for external LLMs."""
     return {"id": row.get("id", ""), "name": Path(row.get("stored_path", "")).name, "date": row.get("date", ""), "year": row.get("year", ""), "category": row.get("category", ""), "classification": row.get("classification", ""), "tags": document_tags(row), "summary": row.get("summary", ""), "smb_url": smb_url_for_row(row)}
 
+def duplicate_group_id(row):
+    return (row.get("is_duplicate") and row.get("duplicate_of")) or row.get("id")
+
 def duplicate_counts_by_original(rows):
-    """Map each original document's id to how many duplicate copies point at it."""
-    return Counter(row.get("duplicate_of") for row in rows if row.get("is_duplicate") and row.get("duplicate_of"))
+    """Map each duplicate group's original id to how many other copies exist in the index.
+
+    Counts only rows that exist, so a duplicate whose original is no longer indexed is not reported as a pair."""
+    sizes = Counter(duplicate_group_id(row) for row in rows)
+    return {group_id: size - 1 for group_id, size in sizes.items() if size > 1}
 
 def serialize_row(row, duplicate_counts=None):
-    original_id = row.get("duplicate_of") or row.get("id")
-    duplicate_count = (duplicate_counts or {}).get(original_id, 0)
+    duplicate_count = (duplicate_counts or {}).get(duplicate_group_id(row), 0)
     document_type = Path(row.get("stored_path", row.get("original_name", ""))).suffix.lower().removeprefix(".") or "unknown"
-    return {**row, "name": Path(row.get("stored_path", "")).name, "type": document_type, "document_tags": document_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "duplicate_count": duplicate_count, "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "ocr_scan": OCR_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})}
+    thumb_url = f"/thumb?id={quote(row.get('id', ''))}&v={quote(row.get('file_hash', '')[:16])}" if document_type == "pdf" else ""
+    return {**row, "name": Path(row.get("stored_path", "")).name, "type": document_type, "document_tags": document_tags(row), "url": f"/file?id={quote(row.get('id', ''))}", "thumb_url": thumb_url, "duplicate_count": duplicate_count, "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "ocr_scan": OCR_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})}
 
 def demo_document_rows():
     """Return screenshot-friendly sample records without writing to the real archive."""
@@ -917,13 +952,26 @@ def demo_document_rows():
 def serialize_demo_row(row, duplicate_counts):
     data = serialize_row(row, duplicate_counts)
     data["url"] = "/demo-document.pdf"
+    data["thumb_url"] = "/thumb?id=demo"
     return data
+
+def asset_version(filename):
+    try: return int((BASE_DIR / "static" / filename).stat().st_mtime)
+    except OSError: return 0
+
+
+@app.context_processor
+def inject_asset_version(): return {"asset_version": asset_version}
+
 
 @app.route("/")
 def index(): return render_template("index.html")
 
 @app.route("/demo-document.pdf")
 def demo_document_pdf():
+    return send_file(BytesIO(demo_pdf_bytes()), mimetype="application/pdf", download_name="doggs-demo-document.pdf")
+
+def demo_pdf_bytes():
     document = fitz.open()
     try:
         page = document.new_page(width=595, height=842)
@@ -934,7 +982,7 @@ def demo_document_pdf():
         page.insert_text((46, 178), "Date: 18 November 2025", fontsize=11, color=(0.28, 0.35, 0.42))
         page.draw_line((46, 198), (549, 198), color=(0.78, 0.83, 0.88), width=0.8)
         page.insert_textbox(fitz.Rect(46, 224, 520, 350), "This is a fictional PDF used only for the DOGGS demo view. It provides a consistent preview for every sample document and duplicate record.", fontsize=12, lineheight=1.5, color=(0.12, 0.18, 0.24))
-        return send_file(BytesIO(document.tobytes(garbage=4, deflate=True)), mimetype="application/pdf", download_name="doggs-demo-document.pdf")
+        return document.tobytes(garbage=4, deflate=True)
     finally:
         document.close()
 
@@ -1044,7 +1092,9 @@ def delete_file(row_id):
     if path.is_file():
         try: move_to_side_dir(path, TRASH_DIR)
         except OSError: log.exception("Could not move %s to trash", path)
-    write_rows([item for item in rows if item.get("id") != row_id])
+    rows = [item for item in rows if item.get("id") != row_id]
+    promote_orphaned_duplicates(rows)
+    write_rows(rows)
     STATUS_CACHE["payload"] = None
     return jsonify({"ok": True})
 
@@ -1269,6 +1319,37 @@ def serve_file():
     if not is_within(base, full_path): abort(403)
     if not full_path.is_file(): abort(404)
     return send_file(full_path, mimetype=mimetypes.guess_type(full_path.name)[0])
+
+def render_thumbnail(open_document):
+    with open_document() as doc:
+        if not len(doc): return None
+        page = doc.load_page(0); zoom = THUMB_WIDTH / max(page.rect.width, 1)
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    buffer = BytesIO(); Image.frombytes("RGB", [pix.width, pix.height], pix.samples).save(buffer, "JPEG", quality=72, optimize=True)
+    return buffer.getvalue()
+
+@app.route("/thumb")
+def serve_thumbnail():
+    """First-page JPEG preview for the document grid, cached on disk by content hash."""
+    row_id = request.args.get("id", "")
+    if row_id == "demo":
+        data = render_thumbnail(lambda: fitz.open(stream=demo_pdf_bytes(), filetype="pdf"))
+        return send_file(BytesIO(data), mimetype="image/jpeg", max_age=86400)
+    row = next((item for item in read_rows() if item.get("id") == row_id), None)
+    if not row: abort(404)
+    full_path = file_path_for_row(row); base = DUPLICATE_DIR if row.get("location") == "duplicates" else ARCHIVE_DIR
+    if not is_within(base, full_path): abort(403)
+    if not full_path.is_file() or full_path.suffix.lower() != ".pdf": abort(404)
+    cache_key = re.sub(r"[^0-9a-f]", "", row.get("file_hash", "").lower()) or hashlib.sha256(str(full_path).encode()).hexdigest()
+    cache_path = THUMB_DIR / f"{cache_key}-{THUMB_WIDTH}.jpg"
+    if not cache_path.is_file():
+        try: data = render_thumbnail(lambda: fitz.open(full_path))
+        except Exception:
+            log.warning("Could not render thumbnail for %s", full_path); abort(404)
+        if not data: abort(404)
+        THUMB_DIR.mkdir(parents=True, exist_ok=True)
+        temp_path = cache_path.with_suffix(f".{secrets.token_hex(4)}.tmp"); temp_path.write_bytes(data); temp_path.replace(cache_path)
+    return send_file(cache_path, mimetype="image/jpeg", max_age=31536000)
 
 if __name__ == "__main__":
     apply_general_settings(read_settings()["general"]); ensure_dirs(); start_worker(); log.info("DOGGS running at http://%s:%s", HOST, PORT); app.run(host=HOST, port=PORT, threaded=True)

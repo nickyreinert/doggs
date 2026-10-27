@@ -1,12 +1,47 @@
-const state = { q: '', years: new Set(), categories: new Set(), types: new Set(), tags: new Set(), duplicates: false, demo: false, selected: null, requestedDocument: '' };
+const state = { q: '', years: new Set(), categories: new Set(), types: new Set(), tags: new Set(), duplicates: false, demo: false, selected: null, requestedDocument: '', preview: false };
 let files = [], timer, availableYears = [], visibleTags = [], tagAliases = {}, activeSettingsTab = 'tags';
 const $ = id => document.getElementById(id);
-const THEME_KEY = 'doggs-theme';
+const root = document.documentElement;
+const THEME_KEY = 'doggs-theme', SIDEBAR_KEY = 'doggs-sidebar', LIST_WIDTH_KEY = 'doggs-list-width';
+const store = { get: key => { try { return localStorage.getItem(key) } catch { return null } }, set: (key, value) => { try { localStorage.setItem(key, value) } catch {} } };
+
+// 'auto' follows the OS color scheme; 'light'/'dark' force one. Older theme names fall back to auto (midnight -> dark).
+function currentTheme() {
+  const stored = store.get(THEME_KEY);
+  return stored === 'midnight' ? 'dark' : ['light', 'dark'].includes(stored) ? stored : 'auto';
+}
 
 function applyTheme(name) {
-  document.documentElement.dataset.theme = name;
-  try { localStorage.setItem(THEME_KEY, name) } catch {}
+  if (name === 'auto') delete root.dataset.theme; else root.dataset.theme = name;
+  store.set(THEME_KEY, name);
   document.querySelectorAll('[data-theme-choice]').forEach(card => card.classList.toggle('selected', card.dataset.themeChoice === name));
+}
+
+function setSidebar(open) {
+  root.classList.toggle('sidebar-closed', !open);
+  $('sidebarToggle').setAttribute('aria-expanded', String(open));
+  // On narrow screens the sidebar is a temporary drawer, so only the desktop preference is remembered.
+  if (!isNarrow()) store.set(SIDEBAR_KEY, open ? 'open' : 'closed');
+}
+
+const isNarrow = () => matchMedia('(max-width: 1000px)').matches;
+if (isNarrow()) root.classList.add('sidebar-closed');
+
+// The preview panel and the full-width thumbnail grid are two states of the same workspace.
+function setPreview(open, updateUrl = true) {
+  state.preview = open;
+  root.classList.toggle('preview-open', open);
+  $('previewToggle').setAttribute('aria-pressed', String(open));
+  if (open) loadFrame();
+  else { $('frame').removeAttribute('src'); closeDuplicates(false) }
+  if (!open && state.selected) requestAnimationFrame(() => document.querySelector('#files .file.active')?.scrollIntoView({ block: 'nearest' }));
+  if (updateUrl) syncUrl(true);
+}
+
+function loadFrame() {
+  const f = state.selected;
+  if (!state.preview || !f || $('duplicatesView').classList.contains('open')) return;
+  if ($('frame').getAttribute('src') !== f.url) $('frame').src = f.url;
 }
 
 function syncUrl(push = false) {
@@ -20,6 +55,7 @@ function syncUrl(push = false) {
   if (state.demo) p.set('demo', 'true');
   const documentId = state.selected?.id || state.requestedDocument;
   if (documentId) p.set('document', documentId);
+  if (documentId && !state.preview) p.set('preview', '0');
   if ($('settingsDialog').open) { p.set('settings', '1'); p.set('settings-tab', activeSettingsTab); }
   history[push ? 'pushState' : 'replaceState']({}, '', location.pathname + (p.size ? '?' + p.toString() : ''));
 }
@@ -35,6 +71,9 @@ function restoreUrlState() {
   state.demo = p.get('demo') === 'true';
   state.selected = null;
   state.requestedDocument = p.get('document') || '';
+  state.preview = !!state.requestedDocument && p.get('preview') !== '0';
+  root.classList.toggle('preview-open', state.preview);
+  $('previewToggle').setAttribute('aria-pressed', String(state.preview));
   $('query').value = state.q;
   $('duplicates').checked = state.duplicates;
   $('cleanDuplicatesButton').hidden = !state.duplicates;
@@ -59,16 +98,13 @@ async function refresh() {
   if (!r.ok) return;
   const d = await r.json();
   availableYears = (d.years || []).map(i => i.value);
-  $('years').innerHTML = '<option value="">All years</option>' + (d.years || []).map(i => '<option value="' + i.value + '">' + i.value + ' (' + i.count + ')</option>').join('');
-  [...$('years').options].forEach(o => o.selected = state.years.size ? state.years.has(o.value) : o.value === '');
-  $('categories').innerHTML = '<option value="">All categories</option>' + (d.categories || []).map(i => '<option value="' + i.value + '">' + i.value + ' (' + i.count + ')</option>').join('');
-  [...$('categories').options].forEach(o => o.selected = state.categories.size ? state.categories.has(o.value) : o.value === '');
-  $('types').innerHTML = '<option value="">All types</option>' + (d.types || []).map(i => '<option value="' + i.value + '">' + i.value.toUpperCase() + ' (' + i.count + ')</option>').join('');
-  [...$('types').options].forEach(o => o.selected = state.types.size ? state.types.has(o.value) : o.value === '');
+  renderFacet('years', d.years || [], state.years, 'All years');
+  renderFacet('categories', d.categories || [], state.categories, 'All categories');
+  renderFacet('types', d.types || [], state.types, 'All', value => value.toUpperCase());
   renderTags(d.tags || []);
   $('duplicateCount').textContent = d.duplicates_count || 0;
   renderFiles(d.files || []);
-  if (!selectedId && !state.selected && files.length) selectFile(files[0]);
+  if (selectedId && $('duplicatesView').classList.contains('open') && !state.requestedDocument) return;
   if (selectedId) {
     const f = files.find(x => x.id === selectedId) || d.selected_file;
     if (f) {
@@ -82,6 +118,34 @@ async function refresh() {
   }
 }
 
+// Clickable facet list replacing the old multi-select boxes: click toggles a value, "All" clears the facet.
+function renderFacet(id, items, selected, allLabel, format = value => value) {
+  const e = $(id), focusedValue = e.contains(document.activeElement) ? document.activeElement.dataset.value : null;
+  e.innerHTML = '';
+  const make = (value, label, count, active) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'facet-item' + (active ? ' selected' : '') + (count === 0 ? ' zero' : '');
+    b.dataset.value = value;
+    b.setAttribute('aria-pressed', String(active));
+    b.innerHTML = '<span class="facet-label"></span>' + (count == null ? '' : '<span class="count"></span>');
+    b.querySelector('.facet-label').textContent = label;
+    if (count != null) b.querySelector('.count').textContent = count;
+    b.onclick = () => {
+      if (!value) selected.clear();
+      else if (selected.has(value)) selected.delete(value);
+      else selected.add(value);
+      syncUrl(true);
+      refresh();
+    };
+    e.append(b);
+    return b;
+  };
+  make('', allLabel, null, !selected.size);
+  items.forEach(i => make(i.value, format(i.value), i.count, selected.has(i.value)));
+  if (focusedValue != null) e.querySelector('[data-value="' + CSS.escape(focusedValue) + '"]')?.focus();
+}
+
 function renderTags(items) {
   visibleTags = items;
   const e = $('tags'), needle = $('tagSearch').value.trim().toLowerCase();
@@ -91,7 +155,11 @@ function renderTags(items) {
     wrap.className = 'tag-facet';
     const filter = document.createElement('button');
     filter.className = 'chip' + (state.tags.has(i.value) ? ' selected' : '');
-    filter.textContent = i.value + ' (' + i.count + ')';
+    filter.textContent = i.value;
+    const count = document.createElement('span');
+    count.className = 'count';
+    count.textContent = i.count;
+    filter.append(count);
     filter.title = 'Filter by ' + i.value;
     filter.onclick = () => { state.tags.has(i.value) ? state.tags.delete(i.value) : state.tags.add(i.value); syncUrl(true); refresh() };
     const edit = document.createElement('button');
@@ -115,50 +183,101 @@ function renderTags(items) {
 // Duplicate copies are grouped onto their original's list entry with a count badge instead of listed separately.
 // f.duplicate_count comes from the server and is filter-independent, so it stays correct even when the
 // original (or a sibling copy) is hidden by the current year/tag/search filters.
+// Rendered as a thumbnail grid while the preview is closed and as a compact list next to the open preview.
+let renderedSignature = '';
 function renderFiles(list) {
   files = list;
   const e = $('files');
-  e.innerHTML = '';
-  if (!list.length) { e.innerHTML = '<div class="empty">No documents found.</div>'; return }
+  // Skip identical re-renders (periodic refresh) so thumbnails and scroll position stay put.
+  const signature = JSON.stringify(list.map(f => [f.id, f.name, f.pdf_title, f.date, f.year, f.category, f.classification, f.summary, f.duplicate_count, f.thumb_url]));
+  if (signature === renderedSignature && e.childElementCount) { markActiveFile(); return }
+  renderedSignature = signature;
   const byId = new Map(list.map(f => [f.id, f]));
   const visible = list.filter(f => !(f.is_duplicate && f.duplicate_of && byId.has(f.duplicate_of)));
+  $('resultCount').textContent = visible.length === 1 ? '1 document' : visible.length + ' documents';
+  e.innerHTML = '';
+  if (!visible.length) { e.innerHTML = '<div class="empty">No documents match these filters.</div>'; return }
   const groups = {};
   visible.forEach(f => (groups[f.year || 'unknown'] ??= []).push(f));
   Object.keys(groups).sort().reverse().forEach(y => {
     const g = document.createElement('section');
     g.className = 'year-group';
-    g.innerHTML = '<h3>' + y + '</h3>';
-    groups[y].forEach(f => {
-      const dupeCount = f.duplicate_count || 0;
-      const b = document.createElement('button');
-      b.className = 'file' + (state.selected?.id === f.id ? ' active' : '');
-      b.dataset.fileId = f.id;
-      b.innerHTML = '<div class="title"></div><div class="meta"></div><div class="summary"></div>';
-      b.querySelector('.title').textContent = f.name;
-      b.querySelector('.meta').textContent = [f.date || 'no date', f.classification || 'document', f.is_duplicate ? 'duplicate' : ''].filter(Boolean).join(' • ');
-      b.querySelector('.summary').textContent = f.summary || '';
-      if (dupeCount) {
-        const badge = document.createElement('span');
-        badge.className = 'dupe-badge';
-        const total = dupeCount + 1;
-        badge.textContent = String(total);
-        badge.title = total + ' copies of this document (' + dupeCount + ' duplicate' + (dupeCount > 1 ? 's' : '') + ')';
-        b.append(badge);
-      }
-      b.onclick = () => dupeCount ? openDuplicates(f) : selectFile(f);
-      g.append(b);
-    });
+    const heading = document.createElement('h3');
+    heading.innerHTML = '<span></span><span class="count"></span>';
+    heading.firstChild.textContent = y;
+    heading.lastChild.textContent = groups[y].length;
+    const items = document.createElement('div');
+    items.className = 'year-items';
+    groups[y].forEach(f => items.append(fileCard(f)));
+    g.append(heading, items);
     e.append(g);
   });
 }
 
-function selectAdjacentFile(direction) {
+function fileCard(f) {
+  const dupeCount = f.duplicate_count || 0;
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'file' + (state.selected?.id === f.id ? ' active' : '');
+  b.dataset.fileId = f.id;
+  b.innerHTML = '<div class="thumb"><span class="type-label"></span></div><div class="body"><div class="title"></div><div class="meta"></div><div class="summary"></div></div>';
+  b.querySelector('.type-label').textContent = f.type || 'file';
+  if (f.thumb_url) {
+    const img = document.createElement('img');
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.alt = '';
+    img.onload = () => img.classList.add('loaded');
+    img.onerror = () => img.remove();
+    img.src = f.thumb_url;
+    if (img.complete && img.naturalWidth) img.classList.add('loaded');
+    b.querySelector('.thumb').prepend(img);
+  }
+  b.querySelector('.title').textContent = f.pdf_title || f.name;
+  b.title = f.name;
+  b.querySelector('.meta').textContent = [f.date || 'no date', f.category || f.classification].filter(Boolean).join(' · ');
+  b.querySelector('.summary').textContent = f.summary || '';
+  if (dupeCount) {
+    const badge = document.createElement('span');
+    badge.className = 'dupe-badge';
+    const total = dupeCount + 1;
+    badge.textContent = String(total);
+    badge.title = total + ' copies of this document (' + dupeCount + ' duplicate' + (dupeCount > 1 ? 's' : '') + ')';
+    b.append(badge);
+  }
+  b.onclick = () => dupeCount ? openDuplicates(f) : openFile(f);
+  return b;
+}
+
+function markActiveFile() {
+  document.querySelectorAll('#files .file').forEach(card => card.classList.toggle('active', card.dataset.fileId === state.selected?.id));
+}
+
+function openFile(f) {
+  selectFile(f, true, false);
+  if (!state.preview) setPreview(true, false);
+  syncUrl(true);
+}
+
+// Arrow keys move through the list; in the grid they also move by row/column using the cards' on-screen positions.
+function selectAdjacentFile(key) {
   const cards = [...document.querySelectorAll('#files .file')];
   if (!cards.length) return;
   const current = cards.findIndex(card => card.dataset.fileId === state.selected?.id);
-  const next = current < 0 ? (direction > 0 ? 0 : cards.length - 1) : Math.max(0, Math.min(cards.length - 1, current + direction));
-  cards[next].scrollIntoView({ block: 'nearest' });
-  cards[next].click();
+  let next;
+  if (current < 0) next = ['arrowup', 'arrowleft'].includes(key) ? cards.length - 1 : 0;
+  else if (state.preview || key === 'arrowleft' || key === 'arrowright') next = Math.max(0, Math.min(cards.length - 1, current + (['arrowdown', 'arrowright'].includes(key) ? 1 : -1)));
+  else {
+    const from = cards[current].getBoundingClientRect(), down = key === 'arrowdown';
+    const candidates = cards.map((card, index) => ({ index, rect: card.getBoundingClientRect() })).filter(({ rect }) => down ? rect.top > from.top + 4 : rect.top < from.top - 4);
+    if (!candidates.length) return;
+    const rowTop = down ? Math.min(...candidates.map(c => c.rect.top)) : Math.max(...candidates.map(c => c.rect.top));
+    next = candidates.filter(c => Math.abs(c.rect.top - rowTop) < 4).sort((a, b) => Math.abs(a.rect.left - from.left) - Math.abs(b.rect.left - from.left))[0].index;
+  }
+  const f = files.find(x => x.id === cards[next].dataset.fileId);
+  if (!f) return;
+  selectFile(f);
+  document.querySelector('#files .file.active')?.scrollIntoView({ block: 'nearest' });
 }
 
 function clearSelection(updateUrl = true) {
@@ -170,7 +289,8 @@ function clearSelection(updateUrl = true) {
   $('documentMeta').textContent = 'Its details and preview will appear here.';
   $('frame').removeAttribute('src');
   closeDuplicates(false);
-  renderFiles(files);
+  if (state.preview) setPreview(false, false);
+  markActiveFile();
   if (updateUrl) syncUrl(true);
 }
 
@@ -215,10 +335,11 @@ function selectFile(f, load = true, updateUrl = true) {
   $('detailsEditor').hidden = false;
   $('editorActions').hidden = false;
   const isPdf = f.name.toLowerCase().endsWith('.pdf');
+  $('openOriginal').href = f.url;
   $('runOcr').hidden = !isPdf;
   $('allPages').closest('label').hidden = !isPdf;
   $('documentTitle').textContent = f.pdf_title || f.name;
-  $('documentMeta').textContent = [f.name, f.pdf_author, f.date, f.category, f.classification, f.is_duplicate ? 'Duplicate content' : ''].filter(Boolean).join(' • ');
+  $('documentMeta').textContent = [f.name, f.pdf_author, f.date, f.category, f.classification, f.is_duplicate ? 'Duplicate content' : ''].filter(Boolean).join(' · ');
   const ruleBadge = $('ruleMatchBadge');
   if (f.rule_name) {
     ruleBadge.hidden = false;
@@ -239,9 +360,9 @@ function selectFile(f, load = true, updateUrl = true) {
   $('yearInput').title = f.is_duplicate ? 'Duplicate copies are stored together and are not organized by year. Edit the original document to move it.' : '';
   renderDocumentTags(f.document_tags || []);
   $('editorStatus').textContent = ['queued', 'running'].includes(f.normal_scan?.state) ? 'LLM extraction is running…' : f.normal_scan?.state === 'error' ? f.normal_scan.error : '';
-  if (load) $('frame').src = f.url;
+  if (load) loadFrame();
   loadMetadata(f.id);
-  renderFiles(files);
+  markActiveFile();
   if (updateUrl) syncUrl(true);
 }
 
@@ -370,6 +491,7 @@ async function openDuplicates(f) {
   const d = await r.json();
   state.selected = f;
   state.requestedDocument = '';
+  if (!state.preview) setPreview(true, false);
   syncUrl(true);
   renderDuplicatesGrid(d.documents || []);
 }
@@ -377,10 +499,11 @@ async function openDuplicates(f) {
 function renderDuplicatesGrid(list) {
   $('detailsEditor').hidden = true;
   $('editorActions').hidden = true;
+  $('duplicatesView').classList.add('open');
   $('frame').removeAttribute('src');
-  $('frame').hidden = true;
   $('documentTitle').textContent = 'Duplicate documents (' + list.length + ')';
   $('documentMeta').textContent = 'Review each copy and remove the ones you no longer need.';
+  markActiveFile();
   const grid = $('duplicatesGrid');
   grid.innerHTML = '';
   list.forEach(f => {
@@ -401,14 +524,11 @@ function renderDuplicatesGrid(list) {
     cell.append(remove, frame, name);
     grid.append(cell);
   });
-  $('duplicatesView').classList.add('open');
-  renderFiles(files);
 }
 
 function closeDuplicates(reset = true) {
   $('duplicatesView').classList.remove('open');
   $('duplicatesGrid').innerHTML = '';
-  $('frame').hidden = false;
   if (reset) clearSelection(true);
 }
 
@@ -430,6 +550,7 @@ async function refreshStatus() {
     const s = await (await fetch('/api/status')).json(), p = s.pipeline;
     $('ollamaDot').className = 'dot ' + (s.ollama_connected ? 'ok' : 'warn');
     $('ollamaStatus').textContent = s.ollama_connected ? 'Ollama connected' : s.error || 'Ollama unavailable';
+    $('ollamaDot').title = $('ollamaStatus').textContent;
     $('modelStatus').textContent = 'Model: ' + s.model;
     const rescan = s.rescan || {};
     const rescanActive = ['queued', 'running'].includes(rescan.state);
@@ -646,7 +767,7 @@ async function openSettings(updateUrl = true) {
   $('intervalMinutes').value = s.schedule.interval_minutes;
   $('dailyTimes').value = s.schedule.daily_times.join(', ');
   updateScheduleFields();
-  applyTheme(document.documentElement.dataset.theme || 'classic');
+  applyTheme(currentTheme());
   showSettingsTab(activeSettingsTab, false);
   if (!$('settingsDialog').open) $('settingsDialog').showModal();
   if (updateUrl) syncUrl(true);
@@ -715,32 +836,20 @@ async function removeTagAlias(tag) {
 
 function togglePipeline() {
   const open = $('pipeline').classList.toggle('open'), b = $('pipelineToggle');
-  b.textContent = open ? '⌄' : '⌃';
-  b.title = open ? 'Collapse pipeline' : 'Expand pipeline';
-  b.setAttribute('aria-label', b.title);
+  root.classList.toggle('pipeline-open', open);
+  b.title = open ? 'Collapse pipeline (Ctrl+Space)' : 'Expand pipeline (Ctrl+Space)';
+  b.setAttribute('aria-label', open ? 'Collapse pipeline' : 'Expand pipeline');
 }
 
-$('years').onchange = e => {
-  const all = [...e.target.options].find(option => option.value === '');
-  state.years = all?.selected ? new Set() : new Set([...e.target.selectedOptions].map(option => option.value).filter(Boolean));
-  if (all) all.selected = !state.years.size;
-  syncUrl(true);
-  refresh();
+$('sidebarToggle').onclick = () => setSidebar(root.classList.contains('sidebar-closed'));
+$('sidebarScrim').onclick = () => setSidebar(false);
+$('previewToggle').onclick = () => {
+  if (state.preview) { setPreview(false); return }
+  const f = state.selected || files.find(x => !(x.is_duplicate && files.some(o => o.id === x.duplicate_of)));
+  if (f) openFile(f);
 };
-$('categories').onchange = e => {
-  const all = [...e.target.options].find(option => option.value === '');
-  state.categories = all?.selected ? new Set() : new Set([...e.target.selectedOptions].map(option => option.value).filter(Boolean));
-  if (all) all.selected = !state.categories.size;
-  syncUrl(true);
-  refresh();
-};
-$('types').onchange = e => {
-  const all = [...e.target.options].find(option => option.value === '');
-  state.types = all?.selected ? new Set() : new Set([...e.target.selectedOptions].map(option => option.value).filter(Boolean));
-  if (all) all.selected = !state.types.size;
-  syncUrl(true);
-  refresh();
-};
+$('closePreview').onclick = () => setPreview(false);
+$('pipelineSummary').onclick = togglePipeline;
 $('query').oninput = e => { state.q = e.target.value.trim(); syncUrl(); clearTimeout(timer); timer = setTimeout(refresh, 250) };
 $('tagSearch').oninput = () => renderTags(visibleTags);
 $('tagAliasSearch').oninput = renderTagAliases;
@@ -749,7 +858,7 @@ $('documentTitle').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(
 $('duplicates').onchange = e => { state.duplicates = e.target.checked; $('cleanDuplicatesButton').hidden = !state.duplicates; syncUrl(true); refresh() };
 $('resetFilters').onclick = () => {
   state.q = ''; state.years = new Set(); state.categories = new Set(); state.types = new Set(); state.tags = new Set(); state.duplicates = false;
-  $('query').value = ''; $('categories').selectedIndex = 0; $('types').selectedIndex = 0; $('duplicates').checked = false; $('tagSearch').value = ''; $('cleanDuplicatesButton').hidden = true;
+  $('query').value = ''; $('duplicates').checked = false; $('tagSearch').value = ''; $('cleanDuplicatesButton').hidden = true;
   syncUrl(true);
   refresh();
 };
@@ -810,13 +919,18 @@ document.addEventListener('keydown', event => {
       $('query').focus();
     } else if (key === 'f') {
       event.preventDefault();
+      if (root.classList.contains('sidebar-closed')) setSidebar(true);
       $('tagSearch').focus();
-    } else if (key === 'y') {
+    } else if (key === 'y' || key === 'w') {
       event.preventDefault();
-      $('years').focus();
-    } else if (key === 'w') {
+      if (root.classList.contains('sidebar-closed')) setSidebar(true);
+      $(key === 'y' ? 'years' : 'categories').querySelector('.facet-item')?.focus();
+    } else if (key === 'b') {
       event.preventDefault();
-      $('categories').focus();
+      $('sidebarToggle').click();
+    } else if (key === 'e') {
+      event.preventDefault();
+      $('previewToggle').click();
     } else if (key === 's' && event.shiftKey) {
       event.preventDefault();
       if (!$('stopScan').hidden) $('stopScan').click();
@@ -835,20 +949,47 @@ document.addEventListener('keydown', event => {
     }
     return;
   }
-  if (!['arrowup', 'arrowdown'].includes(key) || event.target.closest('input, textarea, select, button, [contenteditable="true"]')) return;
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  const typing = event.target.closest('input, textarea, select, [contenteditable="true"]');
+  if (key === 'escape' && !typing) {
+    if (isNarrow() && !root.classList.contains('sidebar-closed')) setSidebar(false);
+    else if (state.preview) setPreview(false);
+    return;
+  }
+  if (key === 'enter' && !typing && !state.preview && state.selected && !event.target.closest('button, a')) {
+    event.preventDefault();
+    openFile(state.selected);
+    return;
+  }
+  if (!['arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key) || typing) return;
+  if (event.target.closest('button') && !event.target.closest('#files')) return;
+  if (state.preview && ['arrowleft', 'arrowright'].includes(key)) return;
   event.preventDefault();
-  selectAdjacentFile(key === 'arrowdown' ? 1 : -1);
+  selectAdjacentFile(key);
 });
 document.querySelectorAll('.settings-tab').forEach(button => button.onclick = () => showSettingsTab(button.dataset.tab));
 
+// Drag the divider between the list and the preview; width is remembered per browser.
 (() => {
-  const header = $('appHeader'), handle = $('headerResizer'), min = 150, max = 420;
-  let startY = 0, startHeight = 0;
-  handle.addEventListener('pointerdown', event => { startY = event.clientY; startHeight = header.getBoundingClientRect().height; handle.setPointerCapture(event.pointerId); event.preventDefault() });
-  handle.addEventListener('pointermove', event => { if (!handle.hasPointerCapture(event.pointerId)) return; header.style.height = Math.max(min, Math.min(max, startHeight + event.clientY - startY)) + 'px' });
-  handle.addEventListener('pointerup', event => { if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId) });
+  const handle = $('splitter'), min = 260, max = 640;
+  const saved = Number(store.get(LIST_WIDTH_KEY));
+  if (saved >= min && saved <= max) root.style.setProperty('--list-w', saved + 'px');
+  let startX = 0, startWidth = 0;
+  handle.addEventListener('pointerdown', event => { startX = event.clientX; startWidth = $('files').getBoundingClientRect().width; handle.setPointerCapture(event.pointerId); handle.classList.add('dragging'); event.preventDefault() });
+  handle.addEventListener('pointermove', event => {
+    if (!handle.hasPointerCapture(event.pointerId)) return;
+    root.style.setProperty('--list-w', Math.max(min, Math.min(max, startWidth + event.clientX - startX)) + 'px');
+  });
+  handle.addEventListener('pointerup', event => {
+    if (!handle.hasPointerCapture(event.pointerId)) return;
+    handle.releasePointerCapture(event.pointerId);
+    handle.classList.remove('dragging');
+    store.set(LIST_WIDTH_KEY, String(Math.round($('files').getBoundingClientRect().width)));
+  });
+  handle.addEventListener('dblclick', () => { root.style.removeProperty('--list-w'); store.set(LIST_WIDTH_KEY, '') });
 })();
 
+$('sidebarToggle').setAttribute('aria-expanded', String(!root.classList.contains('sidebar-closed')));
 restoreUrlState();
 refresh();
 refreshStatus();

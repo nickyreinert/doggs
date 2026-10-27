@@ -206,9 +206,11 @@ AI_MODE=heuristic
 
 ## Web UI and pipeline
 
-- The top bar filters by year, tags, duplicate state, and free-text search.
-- The sidebar groups documents by year; select a document or use the up and down arrow keys to open it.
+- The top bar holds free-text search; the collapsible left sidebar filters by year, category, type, tags, and duplicate state (`Ctrl+B` toggles it; on small screens it opens as a drawer).
+- Without a selection, documents appear as a full-width thumbnail grid grouped by year. Opening a document switches to a compact list next to the preview (`Ctrl+E` toggles the preview, `Esc` closes it, arrow keys move between documents, `Enter` opens the focused one).
+- Thumbnails of the first PDF page are rendered on demand and cached in `cache/thumbs/` (override with `THUMB_DIR`).
 - The detail view edits title, filename, year, summary, OCR text, and custom tags.
+- **Settings → Layout** chooses automatic (follows the system), light, or dark appearance.
 - Duplicate cards open a grid of all copies with per-copy removal.
 - The footer reports Ollama/model state, OCR readiness, queued inbox files, and processing errors.
 - **Re-Scan all** runs first-page OCR and metadata classification for every indexed document.
