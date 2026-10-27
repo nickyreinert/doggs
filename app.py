@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """DOGGS: local document intake, metadata extraction, and searchable archive."""
 import csv
+import functools
 import hashlib
 import html
 import json
@@ -174,6 +175,13 @@ def ensure_csv():
             writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore")
             writer.writeheader(); writer.writerows(existing)
 
+def save_index(rows):
+    """Write the index to a temp file and swap it in, so sync clients and readers never see a half-written CSV."""
+    temporary = CSV_PATH.with_name(f".{CSV_PATH.name}.{os.getpid()}.tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore"); writer.writeheader(); writer.writerows(rows)
+    os.replace(temporary, CSV_PATH)
+
 def read_rows():
     with CSV_LOCK:
         ensure_dirs(); ensure_csv()
@@ -183,8 +191,14 @@ def read_rows():
 def write_rows(rows):
     with CSV_LOCK:
         ensure_dirs(); ensure_csv()
-        with CSV_PATH.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore"); writer.writeheader(); writer.writerows(rows)
+        save_index(rows)
+
+def index_transaction(function):
+    """Hold the index lock for a whole read-modify-write so concurrent pipeline/UI writes cannot overwrite each other."""
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+        with CSV_LOCK: return function(*args, **kwargs)
+    return wrapper
 
 def mutate_row(row_id, mutation):
     """Atomically update one indexed row without overwriting newer user edits."""
@@ -195,8 +209,7 @@ def mutate_row(row_id, mutation):
         row = next((item for item in rows if item.get("id") == row_id), None)
         if not row: return None
         mutation(row)
-        with CSV_PATH.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore"); writer.writeheader(); writer.writerows(rows)
+        save_index(rows)
         return dict(row)
 
 def sha256_file(path):
@@ -375,12 +388,16 @@ def is_within(base, target):
     try: target.resolve().relative_to(base.resolve()); return True
     except ValueError: return False
 
+def plausible_date(value):
+    """Reject dates outside 1900..next year, e.g. reference numbers such as 7519-12-28-18.45 read as a date."""
+    return value if value and 1900 <= value.year <= date.today().year + 1 else None
+
 def valid_date(year, month, day):
-    try: return date(int(year), int(month), int(day))
+    try: return plausible_date(date(int(year), int(month), int(day)))
     except ValueError: return None
 
 def parse_any_date(value):
-    try: return dateparser.parse(str(value)).date() if value else None
+    try: return plausible_date(dateparser.parse(str(value)).date()) if value else None
     except Exception: return None
 
 def parse_pdf_date(doc):
@@ -772,11 +789,7 @@ def run_full_scan(row_id):
         text = full_ocr_text(file_path_for_row(row))
         if not text: raise ValueError("OCR returned no text. Check the configured OCR language.")
         summary = ai_summary(text) or re.sub(r"\s+", " ", text)[:1000]
-        rows = read_rows()
-        for item in rows:
-            if item.get("id") == row_id:
-                item["summary"] = summary; item["ocr_text"] = text; item["source"] = "full-ocr"; break
-        write_rows(rows)
+        if not mutate_row(row_id, lambda item: item.update(summary=summary, ocr_text=text, source="full-ocr")): raise ValueError("Document no longer exists in the index.")
         FULL_SCAN_STATE[row_id] = {"state": "complete", "error": ""}
     except Exception as exc:
         log.exception("Full scan failed for %s", row_id)
@@ -874,13 +887,24 @@ def run_bulk_rescan(row_ids):
     except Exception as exc:
         log.exception("Bulk rescan failed"); RESCAN_STATE.update(state="error", processing="", error=str(exc))
 
-def process_file(path):
-    file_hash, rows = sha256_file(path), read_rows()
-    original = next((row for row in rows if row.get("file_hash") == file_hash and row.get("location") != "duplicates"), None)
-    if original:
-        destination = unique_path(DUPLICATE_DIR / path.name); shutil.move(str(path), destination)
-        rows.append({**original, "id": f"{file_hash[:12]}-{int(time.time() * 1000)}", "original_name": path.name, "stored_path": destination.relative_to(DUPLICATE_DIR).as_posix(), "location": "duplicates", "is_duplicate": "1", "duplicate_of": original.get("id", ""), "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
-        write_rows(rows); log.info("Stored duplicate %s", destination); return
+def find_original(rows, file_hash):
+    return next((row for row in rows if row.get("file_hash") == file_hash and row.get("location") != "duplicates"), None)
+
+def store_duplicate(path, file_hash, rows, original):
+    """Move an identical copy aside and index it; the caller must hold CSV_LOCK with freshly read rows."""
+    destination = unique_path(DUPLICATE_DIR / path.name); shutil.move(str(path), destination)
+    rows.append({**original, "id": f"{file_hash[:12]}-{int(time.time() * 1000)}", "original_name": path.name, "stored_path": destination.relative_to(DUPLICATE_DIR).as_posix(), "location": "duplicates", "is_duplicate": "1", "duplicate_of": original.get("id", ""), "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
+    write_rows(rows); log.info("Stored duplicate %s", destination)
+
+def plausible_year(value):
+    return bool(re.fullmatch(r"\d{4}", str(value))) and 1900 <= int(value) <= date.today().year + 1
+
+def process_file(path, adopt=False):
+    """Archive an inbox file. With `adopt`, index an unindexed file already inside a year folder, keeping its place and name."""
+    file_hash = sha256_file(path)
+    with CSV_LOCK:
+        rows = read_rows(); original = find_original(rows, file_hash)
+        if original: store_duplicate(path, file_hash, rows, original); return
     text, source, pdf_metadata, pdf_date = document_content(path)
     metadata_text = " ".join(pdf_metadata[key] for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords") if pdf_metadata.get(key))
     analysis_text = f"{metadata_text} {text}".strip()
@@ -897,10 +921,26 @@ def process_file(path):
         inferred = list(dict.fromkeys(inferred + rule.get("tags", [])))
         rule_name, rule_reason = rule.get("name") or "Unnamed rule", "; ".join(reasons)
     slug = slugify("-".join(inferred[:3]) or heuristics["slug"] or classification)
-    destination = unique_path(ARCHIVE_DIR / str(final_date.year) / f"{final_date.isoformat()}_{slug}{path.suffix.lower()}"); destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(path), destination)
-    rows.append({"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix(), "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "category": category, "category_source": category_source, "rule_name": rule_name, "rule_reason": rule_reason, "summary": (heuristics["summary"] if heuristics["classification"] == "invoice" else ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(inferred), "removed_tags": "", "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.now(UTC).isoformat(timespec="seconds")})
-    write_rows(rows); log.info("Archived %s", destination)
+    row = {"id": file_hash[:16], "file_hash": file_hash, "original_name": path.name, "location": "archive", "date": final_date.isoformat(), "year": str(final_date.year), "slug": slug, "classification": classification, "category": category, "category_source": category_source, "rule_name": rule_name, "rule_reason": rule_reason, "summary": (heuristics["summary"] if heuristics["classification"] == "invoice" else ai.get("summary") or heuristics["summary"] or text[:220]).strip()[:240], "tokens": " ".join(inferred), "removed_tags": "", "tags": "", "is_duplicate": "", "duplicate_of": "", **pdf_metadata, "source": source, "created_at": datetime.now(UTC).isoformat(timespec="seconds")}
+    # Extraction can take a while; re-read the index under the lock so edits made meanwhile are kept.
+    with CSV_LOCK:
+        rows = read_rows(); original = find_original(rows, file_hash)
+        if original: store_duplicate(path, file_hash, rows, original); return
+        if adopt and plausible_year(path.parent.name):
+            # The year folder the user chose wins over a date guessed from the content or file time.
+            if final_date.year != int(path.parent.name):
+                final_date = valid_date(path.parent.name, final_date.month, final_date.day) or date(int(path.parent.name), 1, 1)
+                row.update(date=final_date.isoformat(), year=path.parent.name)
+            stale_prefix = re.match(r"(\d{4})-\d\d-\d\d_", path.name)
+            destination = path if not stale_prefix or plausible_year(stale_prefix.group(1)) else unique_path(path.parent / f"{final_date.isoformat()}_{slug}{path.suffix.lower()}")
+        else:
+            generated_name = f"{final_date.isoformat()}_{slug}{path.suffix.lower()}"
+            destination = unique_path(ARCHIVE_DIR / str(final_date.year) / generated_name)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination != path: shutil.move(str(path), destination)
+        rows.append({**row, "stored_path": destination.relative_to(ARCHIVE_DIR).as_posix()})
+        write_rows(rows)
+    log.info("%s %s", "Indexed unindexed archive file" if adopt else "Archived", destination)
 
 def promote_orphaned_duplicates(rows):
     """Turn the oldest copy of each duplicate group whose original is gone into the new archived original."""
@@ -930,6 +970,75 @@ def promote_orphaned_duplicates(rows):
     return changed
 
 DUPLICATE_HASH_CACHE = {}
+ARCHIVE_HASH_CACHE = {}
+ADOPT_FAILED = set()
+
+def unindexed_archive_files(rows):
+    """Supported files inside year folders that no index row points to (moved by hand, restored by a sync tool, or lost)."""
+    indexed = {row.get("stored_path") for row in rows if row.get("location") != "duplicates"}
+    if not ARCHIVE_DIR.is_dir(): return []
+    return sorted(path for folder in ARCHIVE_DIR.iterdir() if folder.is_dir() and re.fullmatch(r"\d{4}", folder.name)
+                  for path in folder.iterdir()
+                  if path.is_file() and not path.name.startswith((".", "~$")) and path.suffix.lower() in SUPPORTED_FORMATS and path.relative_to(ARCHIVE_DIR).as_posix() not in indexed)
+
+def cached_hash(path, cache):
+    stat = path.stat(); key = (str(path), stat.st_size, stat.st_mtime_ns)
+    if key not in cache: cache[key] = sha256_file(path)
+    return cache[key]
+
+def repair_implausible_date(row):
+    """Fix a date such as 7519-12-28 (a misread reference number) using the row's year folder; keep day and month,
+    and replace the matching date prefix in the filename. Returns True when the row changed."""
+    if not row.get("date") or parse_any_date(row.get("date")) or not plausible_year(row.get("year")): return False
+    old = row.get("date") or ""
+    row["date"] = (valid_date(row["year"], old[5:7], old[8:10]) or date(int(row["year"]), 1, 1)).isoformat()
+    path = file_path_for_row(row)
+    stale_prefix = re.match(r"(\d{4})-\d\d-\d\d_", path.name)
+    if path.is_file() and stale_prefix and not plausible_year(stale_prefix.group(1)):
+        renamed = unique_path(path.parent / (row["date"] + path.name[10:])); shutil.move(str(path), renamed)
+        row["stored_path"] = renamed.relative_to(ARCHIVE_DIR).as_posix()
+    log.info("Repaired implausible date %s -> %s for %s", old, row["date"], row.get("stored_path"))
+    return True
+
+def relink_missing_archive_rows(rows):
+    """Point archive rows whose file was moved or renamed by hand at the unindexed archive file with the same hash."""
+    missing = [row for row in rows if row.get("location") != "duplicates" and not file_path_for_row(row).is_file()]
+    if not missing: return False
+    by_hash = {}
+    for path in unindexed_archive_files(rows):
+        try: by_hash.setdefault(cached_hash(path, ARCHIVE_HASH_CACHE), []).append(path)
+        except OSError: continue
+    changed = False
+    for row in missing:
+        candidates = by_hash.get(row.get("file_hash"))
+        if not candidates: continue
+        path = candidates.pop(0)
+        log.info("Relinked moved document %s: %s -> %s", row.get("id"), row.get("stored_path"), path.relative_to(ARCHIVE_DIR))
+        row["stored_path"] = path.relative_to(ARCHIVE_DIR).as_posix(); changed = True
+        if plausible_year(path.parent.name):
+            row["year"] = path.parent.name; repair_implausible_date(row)
+    return changed
+
+def remove_empty_implausible_year_folders():
+    for folder in ARCHIVE_DIR.iterdir() if ARCHIVE_DIR.is_dir() else []:
+        if folder.is_dir() and re.fullmatch(r"\d{4}", folder.name) and not plausible_year(folder.name) and not any(folder.iterdir()):
+            try: folder.rmdir(); log.info("Removed empty archive folder %s", folder)
+            except OSError: pass
+
+def adopt_unindexed_archive_files():
+    for path in unindexed_archive_files(read_rows()):
+        if PIPELINE_STATE["paused"]: return
+        try: key = (str(path), path.stat().st_size, path.stat().st_mtime_ns)
+        except OSError: continue
+        if key in ADOPT_FAILED: continue
+        PIPELINE_STATE["processing"] = path.name
+        try:
+            process_file(path, adopt=True); PIPELINE_STATE["processed"] += 1
+        except Exception as exc:
+            ADOPT_FAILED.add(key); PIPELINE_STATE["last_error"] = f"{path.name}: {exc}"
+            log.exception("Could not index archive file %s", path)
+        finally:
+            PIPELINE_STATE["processing"] = ""
 
 def relink_missing_duplicates(rows):
     """Point duplicate rows whose file was renamed or moved inside DUPLICATE_DIR at the file with the same hash."""
@@ -966,9 +1075,11 @@ def relink_missing_duplicates(rows):
         rows[:] = [row for row in rows if id(row) not in dead]; changed = True
     return changed
 
+@index_transaction
 def reconcile_archive_locations():
     """Move indexed documents into the year directory recorded in the index."""
     rows = read_rows(); changed = relink_missing_duplicates(rows)
+    changed = relink_missing_archive_rows(rows) or changed
     changed = promote_orphaned_duplicates(rows) or changed
     for row in rows:
         if row.get("location") == "duplicates":
@@ -988,6 +1099,8 @@ def reconcile_archive_locations():
                 continue
             year = str(parsed_date.year)
             row["year"] = year
+        if repair_implausible_date(row):
+            current_path = file_path_for_row(row); changed = True
         destination = ARCHIVE_DIR / year / current_path.name
         if current_path != destination.resolve():
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1072,6 +1185,7 @@ def scan_incoming():
                 move_to_side_dir(path, ERROR_DIR)
             finally:
                 PIPELINE_STATE["processing"] = ""
+        if not PIPELINE_STATE["paused"]: adopt_unindexed_archive_files(); remove_empty_implausible_year_folders()
         PIPELINE_STATE["last_scan"] = datetime.now().isoformat(timespec="seconds")
         STATUS_CACHE["payload"] = None
     finally:
@@ -1274,6 +1388,7 @@ def file_duplicates(row_id):
     return jsonify({"documents": [serializer(item, duplicate_counts) for item in group]})
 
 @app.post("/api/file/<row_id>")
+@index_transaction
 def update_file(row_id):
     payload = request.get_json(silent=True) or {}; rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
     if not row: abort(404)
@@ -1309,6 +1424,7 @@ def update_file(row_id):
     return jsonify({"ok": True, "tags": row["tags"], "summary": row["summary"], "year": row["year"], "name": Path(row["stored_path"]).name})
 
 @app.delete("/api/file/<row_id>")
+@index_transaction
 def delete_file(row_id):
     rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
     if not row: abort(404)
@@ -1323,6 +1439,7 @@ def delete_file(row_id):
     return jsonify({"ok": True})
 
 @app.post("/api/duplicates/clean")
+@index_transaction
 def clean_duplicates():
     """Remove every flagged duplicate copy, keeping only the original document in each group."""
     rows = read_rows()
@@ -1337,6 +1454,7 @@ def clean_duplicates():
     return jsonify({"ok": True, "removed": len(duplicate_rows)})
 
 @app.route("/api/file/<row_id>/details", methods=["GET", "POST"])
+@index_transaction
 def file_details(row_id):
     rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
     if not row: abort(404)
@@ -1355,6 +1473,7 @@ def ocr_file(row_id):
     return jsonify({"started": True})
 
 @app.post("/api/file/<row_id>/tags")
+@index_transaction
 def add_file_tag(row_id):
     tag = slugify(str((request.get_json(silent=True) or {}).get("tag", "")))
     if tag == "document": abort(400, "Enter a tag.")
@@ -1376,6 +1495,7 @@ def set_favorite_tag(tag):
     return jsonify({"ok": True, "favorite_tags": settings["favorite_tags"]})
 
 @app.post("/api/files/bulk")
+@index_transaction
 def bulk_update_files():
     """Apply one change (add a tag and/or set the category) to several documents, e.g. after a drag and drop."""
     payload = request.get_json(silent=True) or {}
@@ -1395,6 +1515,7 @@ def bulk_update_files():
     return jsonify({"ok": True, "updated": len(changed)})
 
 @app.delete("/api/file/<row_id>/tags/<tag>")
+@index_transaction
 def remove_file_tag(row_id, tag):
     tag = slugify(tag); rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
     if not row: abort(404)

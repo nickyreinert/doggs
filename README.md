@@ -88,6 +88,8 @@ incoming/ ──→ text extraction / OCR / metadata ──→ archive/YYYY/
 
 Supported documents are moved, not copied, after processing. OCR actions are available for PDFs and images; native text extraction is used for the other formats. Keep a source-scanner folder separate if it needs its own retention policy.
 
+The archive heals itself on every scan: a document you move or rename inside the year folders by hand is re-linked to its index entry by SHA-256, supported files in a year folder that have no index entry are indexed where they are (identical copies go to `_Duplicates`), and dates outside 1900 to next year, such as reference numbers that look like dates, are ignored.
+
 ## Installation
 
 ### macOS
