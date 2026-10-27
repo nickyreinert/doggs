@@ -18,6 +18,7 @@ SEED_KEYWORDS = {
         "rechnung": 3, "rechnungsnummer": 3, "rechnungsbetrag": 3, "rechnungsdatum": 3, "invoice": 3,
         "gesamtbetrag": 2, "zahlbar": 2, "zahlungsziel": 2, "mahnung": 2, "gutschrift": 2, "nettobetrag": 2,
         "=mwst": 1, "faellig": 1, "lieferschein": 1, "bestellnummer": 1, "kundennummer": 1, "buchungsbestaetigung": 1, "bestellbestaetigung": 1,
+        "receipt": 3, "quittung": 3, "kassenbon": 3, "=total": 1, "=amount": 1,
     },
     "banking": {
         "kontoauszug": 4, "girokonto": 3, "kontostand": 3, "dauerauftrag": 3, "tagesgeld": 3, "festgeld": 3,
@@ -55,6 +56,8 @@ SEED_KEYWORDS = {
         "*arzt": 2, "befund": 3, "diagnose": 2, "attest": 2, "patient": 2, "arbeitsunfaehigkeit": 3, "*zeugnis": 2,
         "*urkunde": 2, "personalausweis": 3, "reisepass": 3, "meldebescheinigung": 3, "impf": 2, "rezept": 2,
         "=kita": 2, "*schule": 1, "*therapie": 2, "krankenhaus": 2, "klinik": 2, "praxis": 1,
+        "lebenslauf": 4, "bewerbung": 4, "=cv": 3, "=resume": 3, "anschreiben": 2, "berufserfahrung": 3,
+        "werdegang": 2, "entgeltabrechnung": 6, "gehaltsabrechnung": 6, "lohnabrechnung": 6, "bruttoentgelt": 4, "arbeitsvertrag": 2,
     },
 }
 

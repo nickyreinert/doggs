@@ -616,13 +616,13 @@ def fast_classifier():
         FAST_MODEL_CACHE.update(key=key, model=FastClassifier(categories, examples))
     return FAST_MODEL_CACHE["model"]
 
-def choose_category(extracted, classification, text, row=None):
+def choose_category(extracted, classification, text, row=None, filename=""):
     """Return (category, source). A category the user picked by hand is never replaced automatically."""
     categories = read_settings()["categories"]
     if row and row.get("category_source") == "manual" and row.get("category"): return row["category"], "manual"
     candidate = slugify(extracted.get("category"))
     if candidate in categories: return candidate, "llm"
-    category, _ = fast_classifier().predict(text, FAST_MIN_CONFIDENCE)
+    category, _ = fast_classifier().predict(f"{Path(filename).stem.replace('_', ' ')}\n{text}", FAST_MIN_CONFIDENCE)
     if category: return category, "fast"
     return resolved_category({}, classification, categories), "fallback"
 
@@ -641,7 +641,7 @@ def replace_extracted_result(row, heuristic, extracted, text, filename, keep_exi
     if not (keep_generated and heuristic["classification"] == "document"):
         row["classification"] = slugify(heuristic["classification"] if heuristic["classification"] != "document" else extracted.get("classification") or "document")
     categories = read_settings()["categories"]
-    category, category_source = choose_category(extracted, row["classification"], text, row)
+    category, category_source = choose_category(extracted, row["classification"], text, row, filename)
     suffix = Path(filename).suffix.lower().removeprefix(".")
     rule, reasons = match_rule(filename, suffix, text)
     if rule:
@@ -843,7 +843,7 @@ def process_file(path):
     classification = slugify(ai.get("classification") or heuristics["classification"])
     inferred = combined_tags(heuristics, ai, analysis_text)
     categories = read_settings()["categories"]
-    category, category_source = choose_category(ai, classification, analysis_text)
+    category, category_source = choose_category(ai, classification, analysis_text, filename=path.name)
     rule, reasons = match_rule(path.name, path.suffix.lower().removeprefix("."), analysis_text)
     rule_name, rule_reason = "", ""
     if rule:
