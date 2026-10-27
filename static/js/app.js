@@ -1,5 +1,5 @@
 const state = { q: '', years: new Set(), categories: new Set(), types: new Set(), tags: new Set(), duplicates: false, demo: false, selected: null, requestedDocument: '', preview: false };
-let files = [], timer, availableYears = [], availableCategories = [], visibleTags = [], favoriteTags = [], recentTags = [], tagAliases = {}, activeSettingsTab = 'tags';
+let files = [], timer, availableYears = [], availableCategories = [], visibleTags = [], favoriteTags = [], recentTags = [], tagAliases = {}, activeSettingsTab = 'storage';
 // Ctrl/Shift-click builds a multi-selection that can be dragged onto a category or tag; `dragging` pauses background refreshes.
 const multi = new Set(), DRAG_TYPE = 'application/x-doggs-documents';
 let anchorId = null, dragging = false, toastTimer;
@@ -82,7 +82,7 @@ function restoreUrlState() {
   $('duplicates').checked = state.duplicates;
   $('cleanDuplicatesButton').hidden = !state.duplicates;
   const settings = p.get('settings') === '1';
-  activeSettingsTab = p.get('settings-tab') || 'tags';
+  activeSettingsTab = settingsTabName(p.get('settings-tab'));
   if (settings && !$('settingsDialog').open) openSettings(false);
   if (!settings && $('settingsDialog').open) $('settingsDialog').close();
 }
@@ -840,11 +840,99 @@ async function refreshStatus() {
   }
 }
 
+const SETTINGS_TAB_ALIASES = { general: 'storage', schedule: 'processing', prompts: 'ai', 'external-api': 'integrations', layout: 'appearance' };
+let settingsDirty = false, settingsDefaults = {}, settingsDiagnostics = null;
+
+function settingsTabName(name) {
+  name = SETTINGS_TAB_ALIASES[name] || name;
+  return document.querySelector('.settings-pane[data-pane="' + name + '"]') ? name : 'storage';
+}
+
 function showSettingsTab(name, updateUrl = true) {
+  name = settingsTabName(name);
   activeSettingsTab = name;
   document.querySelectorAll('.settings-tab').forEach(button => button.classList.toggle('active', button.dataset.tab === name));
   document.querySelectorAll('.settings-pane').forEach(pane => pane.hidden = pane.dataset.pane !== name);
+  $('settingsDialog').querySelector('.settings-content').scrollTop = 0;
   if (updateUrl && $('settingsDialog').open) syncUrl(true);
+}
+
+function setSettingsDirty(dirty) {
+  settingsDirty = dirty;
+  $('settingsDirty').hidden = !dirty;
+}
+
+function closeSettings() {
+  if (settingsDirty && !confirm('Discard unsaved settings changes?')) return;
+  setSettingsDirty(false);
+  $('settingsDialog').close();
+}
+
+function scheduleMode() {
+  return document.querySelector('input[name="scheduleMode"]:checked')?.value || 'interval';
+}
+
+function updateSettingsCounts() {
+  const categories = $('categoriesInput').value.split(/[\n,]+/).map(value => value.trim()).filter(Boolean);
+  $('categoryCount').textContent = categories.length + (categories.length === 1 ? ' category' : ' categories');
+  const aliases = Object.keys(tagAliases).length;
+  $('tagAliasCount').textContent = aliases ? aliases + ' renamed' : '';
+}
+
+function fillModelSelect(select, current, models, kind) {
+  const names = models.map(model => model.name);
+  const wanted = kind === 'embed' ? names.filter(name => /embed|bge|minilm|e5|gte/i.test(name)) : names.filter(name => !/embed|bge|minilm|e5|gte/i.test(name));
+  const tagged = name => name.includes(':') ? name : name + ':latest';
+  const options = [current, ...wanted.filter(name => !current || tagged(name) !== tagged(current))].filter(Boolean);
+  select.innerHTML = '';
+  if (kind === 'embed') select.append(new Option('Off (keyword search only)', ''));
+  options.forEach(name => {
+    const model = models.find(item => tagged(item.name) === tagged(name));
+    const size = model?.size ? ' · ' + (model.size / 1e9).toFixed(1) + ' GB' : '';
+    select.append(new Option(name + (model ? size : ' (not installed)'), name));
+  });
+  select.value = current || '';
+}
+
+async function loadSettingsDiagnostics(ollamaUrl) {
+  const status = $('ollamaCheck');
+  status.className = 'setting-hint connection-status';
+  status.textContent = 'Checking Ollama…';
+  try {
+    const query = ollamaUrl ? '?ollama_url=' + encodeURIComponent(ollamaUrl) : '';
+    const d = await (await fetch('/api/settings/diagnostics' + query)).json();
+    settingsDiagnostics = d;
+    const o = d.ollama;
+    status.classList.add(o.connected ? 'ok' : 'bad');
+    status.textContent = o.connected ? '● Connected' + (o.version ? ' · Ollama ' + o.version : '') + ' · ' + o.models.length + ' models installed' : '● ' + (o.error || 'Not reachable');
+    if (o.connected) {
+      fillModelSelect($('generalAiModel'), $('generalAiModel').value, o.models, 'llm');
+      fillModelSelect($('generalEmbedModel'), $('generalEmbedModel').value, o.models, 'embed');
+    }
+    $('ocrLanguageList').innerHTML = d.ocr_languages.map(code => '<option value="' + code + '">').join('');
+    $('ocrInstalled').textContent = d.ocr_languages.length ? 'Installed: ' + d.ocr_languages.join(', ') : 'Could not read the installed Tesseract languages.';
+    renderIntegrationStatus(d);
+  } catch {
+    status.classList.add('bad');
+    status.textContent = '● Could not run the check.';
+  }
+}
+
+function renderIntegrationStatus(d) {
+  const api = d.external_api, search = d.search;
+  const pill = $('apiTokenStatus');
+  pill.textContent = api.token_configured ? 'Enabled' : 'Disabled — no token';
+  pill.className = 'status-pill ' + (api.token_configured ? 'ok' : 'warn');
+  $('externalApiBase').value = api.base_url;
+  $('externalMcpUrl').value = api.mcp_url;
+  $('claudeCommand').value = 'claude mcp add --transport http doggs ' + api.mcp_url + ' --header "Authorization: Bearer $DOGGS_TOKEN"';
+  const busy = search.state === 'running' || search.pending > 0;
+  const state = $('searchIndexState');
+  state.textContent = search.error && !busy ? 'Error' : busy ? 'Indexing · ' + search.pending + ' left' : 'Up to date';
+  state.className = 'status-pill ' + (busy || search.error ? 'warn' : 'ok');
+  state.title = search.error || (search.last_sync ? 'Last sync ' + search.last_sync.replace('T', ' ') : '');
+  const stat = (label, value) => '<div><dt>' + label + '</dt><dd>' + value + '</dd></div>';
+  $('searchIndexStats').innerHTML = stat('Documents', search.documents.toLocaleString()) + stat('With embeddings', search.embedded_documents.toLocaleString()) + stat('Chunks', search.chunks.toLocaleString()) + stat('Model', '<span title="' + (search.model || 'off') + '">' + (search.model ? search.model.split('/').pop().split(':')[0] : 'off') + '</span>');
 }
 
 document.querySelectorAll('[data-theme-choice]').forEach(card => card.onclick = () => applyTheme(card.dataset.themeChoice));
@@ -852,12 +940,12 @@ document.querySelectorAll('[data-theme-choice]').forEach(card => card.onclick = 
 $('addRuleButton').onclick = addRule;
 
 function updateScheduleFields() {
-  const daily = $('scheduleMode').value === 'daily';
+  const daily = scheduleMode() === 'daily';
   $('intervalSchedule').hidden = daily;
   $('dailySchedule').hidden = !daily;
 }
 
-const GENERAL_FIELDS = { generalIncoming: 'incoming_dir', generalArchive: 'archive_dir', generalError: 'error_dir', generalDuplicate: 'duplicate_dir', generalTrash: 'trash_dir', generalOcrLang: 'ocr_lang', generalAiMode: 'ai_mode', generalOllamaUrl: 'ollama_url', generalAiModel: 'ai_model', generalClassifier: 'classifier' };
+const GENERAL_FIELDS = { generalIncoming: 'incoming_dir', generalArchive: 'archive_dir', generalError: 'error_dir', generalDuplicate: 'duplicate_dir', generalTrash: 'trash_dir', generalOcrLang: 'ocr_lang', generalAiMode: 'ai_mode', generalOllamaUrl: 'ollama_url', generalAiModel: 'ai_model', generalClassifier: 'classifier', generalEmbedModel: 'embed_model' };
 
 let ruleCategories = [];
 
@@ -880,13 +968,13 @@ function createRuleRow(rule) {
   enabledLabel.append(enabled, document.createTextNode(' Enabled'));
   const up = document.createElement('button');
   up.type = 'button'; up.className = 'icon-button rule-up'; up.textContent = '↑'; up.title = 'Move up'; up.setAttribute('aria-label', 'Move rule up');
-  up.onclick = () => { const prev = row.previousElementSibling; if (prev) row.parentElement.insertBefore(row, prev) };
+  up.onclick = () => { const prev = row.previousElementSibling; if (prev) { row.parentElement.insertBefore(row, prev); setSettingsDirty(true) } };
   const down = document.createElement('button');
   down.type = 'button'; down.className = 'icon-button rule-down'; down.textContent = '↓'; down.title = 'Move down'; down.setAttribute('aria-label', 'Move rule down');
-  down.onclick = () => { const next = row.nextElementSibling; if (next) row.parentElement.insertBefore(next, row) };
+  down.onclick = () => { const next = row.nextElementSibling; if (next) { row.parentElement.insertBefore(next, row); setSettingsDirty(true) } };
   const remove = document.createElement('button');
   remove.type = 'button'; remove.className = 'icon-button rule-remove'; remove.textContent = '✕'; remove.title = 'Remove rule'; remove.setAttribute('aria-label', 'Remove rule');
-  remove.onclick = () => row.remove();
+  remove.onclick = () => { row.remove(); setSettingsDirty(true) };
   const test = document.createElement('button');
   test.type = 'button'; test.className = 'action rule-test'; test.textContent = 'Test';
   test.onclick = () => testRule(row);
@@ -941,7 +1029,11 @@ function renderRules(rules, categories) {
 }
 
 function addRule() {
-  $('ruleList').append(createRuleRow({ name: '', enabled: true, conditions: {}, content_chars: 500, category: '', tags: [] }));
+  const row = createRuleRow({ name: '', enabled: true, conditions: {}, content_chars: 500, category: '', tags: [] });
+  $('ruleList').append(row);
+  setSettingsDirty(true);
+  row.scrollIntoView({ block: 'nearest' });
+  row.querySelector('.rule-name').focus();
 }
 
 function collectRules() {
@@ -1008,12 +1100,16 @@ async function testRule(row) {
 function populateGeneralSettings(general, locked) {
   Object.entries(GENERAL_FIELDS).forEach(([id, key]) => {
     const field = $(id);
+    if (field.tagName === 'SELECT' && id !== 'generalAiMode' && id !== 'generalClassifier') fillModelSelect(field, general[key] ?? '', [], id === 'generalEmbedModel' ? 'embed' : 'llm');
     field.value = general[key] ?? '';
     field.disabled = !!locked[key];
-    field.title = locked[key] ? 'Set via the ' + key.toUpperCase() + ' environment variable' : '';
+    field.title = locked[key] ? 'Set by ' + key.toUpperCase() + ' in the server .env' : '';
+    const badge = document.querySelector('label[for="' + id + '"] .lock-badge');
+    if (badge) { badge.hidden = !locked[key]; badge.title = field.title }
   });
   $('generalRecursive').checked = !!general.recursive_scan;
   $('generalRecursive').disabled = !!locked.recursive_scan;
+  $('testOllama').disabled = !!locked.ollama_url && general.ai_mode === 'heuristic';
 }
 
 async function openSettings(updateUrl = true) {
@@ -1021,8 +1117,6 @@ async function openSettings(updateUrl = true) {
   $('ignoredTags').value = s.ignored_tags.join(', ');
   $('categoriesInput').value = (s.categories || []).join('\n');
   renderRules(s.rules || [], s.categories || []);
-  $('externalApiPort').value = s.external_api?.port ?? '';
-  $('externalApiTokenStatus').value = s.external_api?.token_configured ? 'Configured via EXTERNAL_API_TOKEN' : 'Not configured; external API is disabled';
   $('smbShareUrl').value = s.external_api?.smb_share_url || '';
   tagAliases = s.tag_aliases || {};
   $('tagAliasSearch').value = '';
@@ -1030,14 +1124,19 @@ async function openSettings(updateUrl = true) {
   populateGeneralSettings(s.general || {}, s.general_locked || {});
   $('metadataPrompt').value = s.prompts.metadata;
   $('summaryPrompt').value = s.prompts.summary;
-  $('scheduleMode').value = s.schedule.mode;
+  settingsDefaults = s.prompt_defaults || {};
+  document.querySelectorAll('input[name="scheduleMode"]').forEach(radio => radio.checked = radio.value === s.schedule.mode);
   $('intervalMinutes').value = s.schedule.interval_minutes;
   $('dailyTimes').value = s.schedule.daily_times.join(', ');
   updateScheduleFields();
   applyTheme(currentTheme());
+  updateSettingsCounts();
+  setSettingsDirty(false);
+  $('settingsMessage').textContent = '';
   showSettingsTab(activeSettingsTab, false);
   if (!$('settingsDialog').open) $('settingsDialog').showModal();
   if (updateUrl) syncUrl(true);
+  loadSettingsDiagnostics();
 }
 
 async function saveSettings(event) {
@@ -1048,11 +1147,26 @@ async function saveSettings(event) {
     rules: collectRules(),
     external_api: { smb_share_url: $('smbShareUrl').value.trim() },
     prompts: { metadata: $('metadataPrompt').value, summary: $('summaryPrompt').value },
-    schedule: { mode: $('scheduleMode').value, interval_minutes: $('intervalMinutes').value, daily_times: $('dailyTimes').value.split(/[\s,]+/).filter(Boolean) },
+    schedule: { mode: scheduleMode(), interval_minutes: $('intervalMinutes').value, daily_times: $('dailyTimes').value.split(/[\s,]+/).filter(Boolean) },
     general: { ...Object.fromEntries(Object.entries(GENERAL_FIELDS).map(([id, key]) => [key, $(id).value.trim()])), recursive_scan: $('generalRecursive').checked }
   };
-  const r = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-  if (r.ok) { $('settingsDialog').close(); refresh(); refreshStatus() }
+  const message = $('settingsMessage'), button = $('saveSettingsButton');
+  button.disabled = true;
+  message.className = 'settings-message';
+  message.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Saving failed (' + r.status + ')');
+    setSettingsDirty(false);
+    $('settingsDialog').close();
+    showToast('Settings saved');
+    refresh(); refreshStatus();
+  } catch (error) {
+    message.className = 'settings-message error';
+    message.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // First run: nudge the user to set up storage folders before they start scanning documents.
@@ -1068,6 +1182,7 @@ function renderTagAliases() {
   const entries = Object.entries(tagAliases).filter(([from, to]) => !needle || from.includes(needle) || to.includes(needle)).sort(([a], [b]) => a.localeCompare(b));
   const list = $('tagAliasList');
   list.innerHTML = '';
+  updateSettingsCounts();
   if (!entries.length) { list.innerHTML = '<div class="empty">No renamed tags yet.</div>'; return }
   entries.forEach(([from, to]) => {
     const row = document.createElement('div');
@@ -1183,10 +1298,28 @@ $('stopScan').onclick = async () => {
 };
 $('pausePipeline').onclick = async () => { await fetch('/api/pipeline/pause', { method: 'POST' }); refreshStatus() };
 $('settingsButton').onclick = () => openSettings(true);
-$('cancelSettings').onclick = () => $('settingsDialog').close();
+$('cancelSettings').onclick = closeSettings;
+$('closeSettings').onclick = closeSettings;
+$('settingsDialog').addEventListener('cancel', event => { event.preventDefault(); closeSettings() });
+$('settingsForm').addEventListener('input', event => { if (event.target.id !== 'tagAliasSearch') setSettingsDirty(true) });
+$('settingsForm').addEventListener('change', event => { if (event.target.id !== 'tagAliasSearch' && !event.target.closest('#themeGrid')) setSettingsDirty(true) });
+$('categoriesInput').addEventListener('input', updateSettingsCounts);
+$('testOllama').onclick = () => loadSettingsDiagnostics($('generalOllamaUrl').value.trim());
+document.querySelectorAll('[data-reset-prompt]').forEach(button => button.onclick = () => {
+  const key = button.dataset.resetPrompt, field = $(key + 'Prompt');
+  if (!settingsDefaults[key] || field.value === settingsDefaults[key]) return;
+  field.value = settingsDefaults[key];
+  setSettingsDirty(true);
+});
+document.querySelectorAll('[data-copy]').forEach(button => button.onclick = async () => {
+  const field = $(button.dataset.copy);
+  try { await navigator.clipboard.writeText(field.value) } catch { field.select(); document.execCommand('copy') }
+  button.textContent = 'Copied';
+  setTimeout(() => button.textContent = 'Copy', 1200);
+});
 $('settingsDialog').addEventListener('close', () => syncUrl());
 $('settingsForm').onsubmit = saveSettings;
-$('scheduleMode').onchange = updateScheduleFields;
+document.querySelectorAll('input[name="scheduleMode"]').forEach(radio => radio.onchange = updateScheduleFields);
 document.addEventListener('keydown', event => {
   if (event.defaultPrevented || $('settingsDialog').open) return;
   const key = event.key.toLowerCase();

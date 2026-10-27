@@ -35,4 +35,4 @@ GET /documents?years=2025,2026&tags=invoice,utilities
 
 - This API is read-only. Do not infer that documents can be changed, deleted, or reclassified through it.
 - Never expose archive data or SMB URLs outside the user's trusted network context.
-- If `smb_url` is empty, ask the user to configure the SMB share in DOGGS Settings -> External API.
+- If `smb_url` is empty, ask the user to configure the SMB share in DOGGS Settings → API & MCP.

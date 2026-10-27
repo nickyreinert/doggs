@@ -145,7 +145,7 @@ Restart DOGGS after changing `.env`. Relative local paths are resolved from the 
 | `CLASSIFIER` | `fast` (built-in classifier; LLM only on request) or `llm` (LLM for every new document) | `fast` |
 | `LLM_INPUT_CHARS` | Maximum characters of a text document sent to the LLM | `1500` |
 | `FAST_MIN_CONFIDENCE` | Minimum confidence before the fast classifier assigns a category | `0.6` |
-| `EMBED_MODEL` | Ollama embedding model for semantic search (empty disables embeddings; keyword search still works) | `jina/jina-embeddings-v2-base-de` |
+| `EMBED_MODEL` | Ollama embedding model for semantic search (empty disables embeddings; keyword search still works; also selectable in Settings → AI & classification when not set in `.env`) | `jina/jina-embeddings-v2-base-de` |
 | `SEARCH_DB_PATH` | Local search index (a rebuildable cache; keep it out of synced folders) | `./cache/search.sqlite` |
 | `SEARCH_OCR_PAGES` | Pages OCR'd for the search index when a PDF has no text layer | `3` |
 | `EXTERNAL_API_TOKEN` | Bearer token required by the external archive API | unset (API disabled) |
@@ -168,7 +168,7 @@ DOGGS offers a read-only API for external LLM tools. It runs on the same port as
 EXTERNAL_API_TOKEN=replace-with-a-long-random-secret
 ```
 
-In **Settings -> External API**, enter the SMB share URL that exposes the archive to the external client, for example `smb://nas.local/documents`. SMB sharing must be enabled and the archive must be reachable through that share. DOGGS returns archive-relative document pointers as `smb_url`; it does not transfer document bytes through the external API.
+In **Settings → API & MCP**, enter the SMB share URL that exposes the archive to the external client, for example `smb://nas.local/documents`. SMB sharing must be enabled and the archive must be reachable through that share. DOGGS returns archive-relative document pointers as `smb_url`; it does not transfer document bytes through the external API.
 
 Every request requires the header `Authorization: Bearer <EXTERNAL_API_TOKEN>`.
 
@@ -245,7 +245,7 @@ For non-PDF documents, DOGGS reads the first 80 non-empty lines (configurable th
 
 Unsupported file types remain untouched in the incoming folder and are listed in the pipeline panel.
 
-The **Categories** Settings tab manages the allowed high-level categories. In **fast** mode (Settings → General → Category classification) a built-in classifier assigns one of these in milliseconds and the LLM runs only when you click **Re-extract**; in **LLM** mode the model picks the category for every new document. Categories you set by hand are never overwritten by re-scans and train the fast classifier; categories without built-in German keywords are matched by their own name; the default categories include financial documents, invoices, incoming and outgoing documents, banking, tax office, insurance, contracts, personal documents, and miscellaneous.
+The **Categories** Settings tab manages the allowed high-level categories. In **fast** mode (Settings → AI & classification → New documents) a built-in classifier assigns one of these in milliseconds and the LLM runs only when you click **Re-extract**; in **LLM** mode the model picks the category for every new document. Categories you set by hand are never overwritten by re-scans and train the fast classifier; categories without built-in German keywords are matched by their own name; the default categories include financial documents, invoices, incoming and outgoing documents, banking, tax office, insurance, contracts, personal documents, and miscellaneous.
 
 When local AI is enabled during installation, `install.sh` installs Ollama automatically when it is missing and pulls the selected model (default: `qwen2.5:1.5b`).
 
@@ -267,7 +267,7 @@ AI_MODE=heuristic
 - Without a selection, documents appear as a full-width thumbnail grid grouped by year. Opening a document switches to a compact list next to the preview (`Ctrl+E` toggles the preview, `Esc` closes it, arrow keys move between documents, `Enter` opens the focused one).
 - Thumbnails of the first PDF page or image are rendered on demand and cached in `cache/thumbs/` (override with `THUMB_DIR`).
 - The detail view edits title, filename, year, summary, OCR text, and custom tags.
-- **Settings → Layout** chooses automatic (follows the system), light, or dark appearance.
+- **Settings → Appearance** chooses automatic (follows the system), light, or dark appearance.
 - Duplicate cards open a grid of all copies with per-copy removal.
 - The footer reports Ollama/model state, OCR readiness, queued inbox files, and processing errors.
 - **Re-Scan all** runs first-page OCR and metadata classification for every indexed document.

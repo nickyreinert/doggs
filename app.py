@@ -292,7 +292,7 @@ def normalize_rule(rule):
         "tags": tag_values(rule.get("tags", [])),
     }
 
-GENERAL_ENV_MAP = {"incoming_dir": "INCOMING_DIR", "archive_dir": "ARCHIVE_DIR", "error_dir": "ERROR_DIR", "duplicate_dir": "DUPLICATE_DIR", "trash_dir": "TRASH_DIR", "recursive_scan": "RECURSIVE_SCAN", "ocr_lang": "OCR_LANG", "ai_mode": "AI_MODE", "ollama_url": "OLLAMA_URL", "ai_model": "AI_MODEL", "classifier": "CLASSIFIER"}
+GENERAL_ENV_MAP = {"incoming_dir": "INCOMING_DIR", "archive_dir": "ARCHIVE_DIR", "error_dir": "ERROR_DIR", "duplicate_dir": "DUPLICATE_DIR", "trash_dir": "TRASH_DIR", "recursive_scan": "RECURSIVE_SCAN", "ocr_lang": "OCR_LANG", "ai_mode": "AI_MODE", "ollama_url": "OLLAMA_URL", "ai_model": "AI_MODEL", "classifier": "CLASSIFIER", "embed_model": "EMBED_MODEL"}
 
 def general_locked_fields():
     """Fields whose environment variable is explicitly set can't be overridden from the UI."""
@@ -307,11 +307,11 @@ def general_is_configured(raw_general):
     return all(locked.get(key) for key in STORAGE_DIR_KEYS)
 
 def current_general_defaults():
-    return {"incoming_dir": str(INCOMING_DIR), "archive_dir": str(ARCHIVE_DIR), "error_dir": str(ERROR_DIR), "duplicate_dir": str(DUPLICATE_DIR), "trash_dir": str(TRASH_DIR), "recursive_scan": RECURSIVE_SCAN, "ocr_lang": OCR_LANG, "ai_mode": AI_MODE, "ollama_url": OLLAMA_URL, "ai_model": AI_MODEL, "classifier": CLASSIFIER}
+    return {"incoming_dir": str(INCOMING_DIR), "archive_dir": str(ARCHIVE_DIR), "error_dir": str(ERROR_DIR), "duplicate_dir": str(DUPLICATE_DIR), "trash_dir": str(TRASH_DIR), "recursive_scan": RECURSIVE_SCAN, "ocr_lang": OCR_LANG, "ai_mode": AI_MODE, "ollama_url": OLLAMA_URL, "ai_model": AI_MODEL, "classifier": CLASSIFIER, "embed_model": EMBED_MODEL}
 
 def apply_general_settings(general):
     """Reassign the live directory/AI globals so a settings change applies without a restart."""
-    global INCOMING_DIR, ARCHIVE_DIR, ERROR_DIR, DUPLICATE_DIR, TRASH_DIR, RECURSIVE_SCAN, OCR_LANG, OCR_LANGS, AI_MODE, OLLAMA_URL, AI_MODEL, CLASSIFIER
+    global INCOMING_DIR, ARCHIVE_DIR, ERROR_DIR, DUPLICATE_DIR, TRASH_DIR, RECURSIVE_SCAN, OCR_LANG, OCR_LANGS, AI_MODE, OLLAMA_URL, AI_MODEL, CLASSIFIER, EMBED_MODEL
     locked = general_locked_fields()
     def resolved(key, current_path):
         if locked.get(key): return current_path
@@ -332,6 +332,7 @@ def apply_general_settings(general):
     if not locked.get("ollama_url") and str(general.get("ollama_url") or "").strip(): OLLAMA_URL = str(general["ollama_url"]).strip()
     if not locked.get("ai_model") and str(general.get("ai_model") or "").strip(): AI_MODEL = str(general["ai_model"]).strip()
     if not locked.get("classifier") and general.get("classifier") in {"fast", "llm"}: CLASSIFIER = general["classifier"]
+    if not locked.get("embed_model") and "embed_model" in general: EMBED_MODEL = str(general.get("embed_model") or "").strip()
     ensure_dirs()
 
 def ignored_tags(): return set(read_settings()["ignored_tags"])
@@ -1255,7 +1256,7 @@ def search_loop():
     except (AttributeError, OSError): pass
     time.sleep(10)
     while True:
-        SEARCH.ollama_url, SEARCH.enabled = OLLAMA_URL.rstrip("/"), AI_MODE != "heuristic" and bool(EMBED_MODEL)
+        SEARCH.ollama_url, SEARCH.model, SEARCH.enabled = OLLAMA_URL.rstrip("/"), EMBED_MODEL, AI_MODE != "heuristic" and bool(EMBED_MODEL)
         try:
             SEARCH.state["state"] = "indexing"
             changed = SEARCH.sync([row for row in read_rows() if row.get("location") == "archive"], search_description)
@@ -1835,7 +1836,26 @@ def settings():
             if isinstance(values, str): values = re.split(r"[\s,]+", values)
             if isinstance(values, list): current["schedule"]["daily_times"] = sorted(set(value for value in values if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(value))))
         write_settings(current); STATUS_CACHE["payload"] = None
-    return jsonify(read_settings())
+    return jsonify({**read_settings(), "prompt_defaults": {"metadata": DEFAULT_METADATA_PROMPT, "summary": DEFAULT_SUMMARY_PROMPT}})
+
+@app.get("/api/settings/diagnostics")
+def settings_diagnostics():
+    """Live checks for the settings dialog: Ollama reachability and models, OCR languages, search index, MCP address."""
+    url = (request.args.get("ollama_url") or OLLAMA_URL).strip().rstrip("/")
+    ollama = {"url": url, "connected": False, "version": "", "models": [], "error": ""}
+    if not re.fullmatch(r"https?://[^\s/]+(/\S*)?", url): ollama["error"] = "Enter an http:// or https:// URL."
+    else:
+        try:
+            response = requests.get(f"{url}/api/tags", timeout=3); response.raise_for_status()
+            ollama["models"] = sorted(({"name": model.get("name", ""), "size": model.get("size", 0), "family": (model.get("details") or {}).get("family", "")} for model in response.json().get("models", [])), key=lambda model: model["name"])
+            ollama["connected"] = True
+            try: ollama["version"] = requests.get(f"{url}/api/version", timeout=2).json().get("version", "")
+            except (requests.RequestException, ValueError): pass
+        except (requests.RequestException, ValueError) as error: ollama["error"] = f"Not reachable: {type(error).__name__}"
+    try: ocr_languages = sorted(language for language in pytesseract.get_languages(config="") if language != "osd")
+    except Exception: ocr_languages = []
+    base = request.host_url.rstrip("/")
+    return jsonify({"ollama": ollama, "ocr_languages": ocr_languages, "search": SEARCH.stats(), "external_api": {"token_configured": bool(EXTERNAL_API_TOKEN), "base_url": f"{base}/api/external/v1", "mcp_url": f"{base}/api/external/v1/mcp"}})
 
 @app.post("/api/rules/test")
 def test_rule():

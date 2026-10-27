@@ -172,127 +172,208 @@
   </div>
 </footer>
 <div class="toast" id="toast" role="status" hidden></div>
-<dialog id="settingsDialog">
-<form id="settingsForm">
-  <h2>Settings</h2>
-  <nav class="settings-tabs" aria-label="Settings sections">
-    <button type="button" class="settings-tab" data-tab="general">General</button>
-    <button type="button" class="settings-tab active" data-tab="tags">Tags</button>
-    <button type="button" class="settings-tab" data-tab="categories">Categories</button>
-    <button type="button" class="settings-tab" data-tab="rules">Rules</button>
-    <button type="button" class="settings-tab" data-tab="external-api">External API</button>
-    <button type="button" class="settings-tab" data-tab="prompts">LLM prompts</button>
-    <button type="button" class="settings-tab" data-tab="schedule">Background schedule</button>
-    <button type="button" class="settings-tab" data-tab="layout">Layout</button>
-  </nav>
-  <section class="settings-pane" data-pane="general" hidden>
-    <p>These folders and defaults were set via <code>.env</code> or built-in defaults. Fields marked as locked are set by an environment variable and can't be changed here.</p>
-    <label class="editor" for="generalIncoming">Incoming folder</label>
-    <input id="generalIncoming" placeholder="./incoming">
-    <label class="editor" for="generalArchive">Archive folder</label>
-    <input id="generalArchive" placeholder="./archive">
-    <label class="editor" for="generalError">Failed-PDF folder</label>
-    <input id="generalError" placeholder="./errors">
-    <label class="editor" for="generalDuplicate">Duplicate folder</label>
-    <input id="generalDuplicate" placeholder="./duplicates">
-    <label class="editor" for="generalTrash">Trash folder</label>
-    <input id="generalTrash" placeholder="./trash">
-    <label class="all-pages" for="generalRecursive"><input id="generalRecursive" type="checkbox"> Also scan subfolders of the incoming folder</label>
-    <br />
-    <label class="editor" for="generalOcrLang">OCR language(s)</label>
-    <input id="generalOcrLang" placeholder="eng or eng+deu">
-    <label class="editor" for="generalAiMode">Metadata extraction mode</label>
-    <select id="generalAiMode">
-      <option value="ollama">Ollama (local LLM)</option>
-      <option value="heuristic">Heuristics only</option>
-    </select>
-    <label class="editor" for="generalClassifier">Category classification</label>
-    <select id="generalClassifier">
-      <option value="fast">Fast classifier (automatic, no LLM; LLM only via Re-extract)</option>
-      <option value="llm">LLM for every new document</option>
-    </select>
-    <label class="editor" for="generalOllamaUrl">Ollama URL</label>
-    <input id="generalOllamaUrl" placeholder="http://127.0.0.1:11434">
-    <label class="editor" for="generalAiModel">Ollama model</label>
-    <input id="generalAiModel" placeholder="qwen2.5:3b">
-  </section>
-  <section class="settings-pane" data-pane="tags" hidden>
-    <p>Ignored inferred tags are hidden from tag lists and document headers. Custom tags are never removed.</p>
-    <label class="editor" for="ignoredTags">Ignored tags</label>
-    <textarea id="ignoredTags" placeholder="fpdf, printer"></textarea>
-    <label class="editor" for="tagAliasSearch">Canonical tags (renamed / merged)</label>
-    <input id="tagAliasSearch" type="search" placeholder="Filter renamed tags…">
-    <div class="tag-alias-list" id="tagAliasList"></div>
-  </section>
-  <section class="settings-pane" data-pane="categories" hidden>
-    <p>One category per line. The LLM must assign every processed document to one of these categories.</p>
-    <label class="editor" for="categoriesInput">Document categories</label>
-    <textarea id="categoriesInput" placeholder="financial-document&#10;invoice&#10;incoming&#10;outgoing&#10;banking&#10;tax-office&#10;insurance&#10;contract&#10;personal&#10;misc"></textarea>
-  </section>
-  <section class="settings-pane" data-pane="rules" hidden>
-    <p>Rules run top to bottom during processing; the first enabled rule whose conditions all match sets the category and adds tags. Leave a condition blank to skip it.</p>
-    <div class="rule-list" id="ruleList"></div>
-    <button type="button" class="action" id="addRuleButton">Add rule</button>
-  </section>
-  <section class="settings-pane" data-pane="external-api" hidden>
-    <p>External integrations use the same server port as DOGGS and require the <code>EXTERNAL_API_TOKEN</code> environment variable.</p>
-    <label class="editor" for="externalApiPort">API port</label>
-    <input id="externalApiPort" readonly>
-    <label class="editor" for="externalApiTokenStatus">API token</label>
-    <input id="externalApiTokenStatus" readonly>
-    <label class="editor" for="smbShareUrl">SMB share URL</label>
-    <input id="smbShareUrl" placeholder="smb://nas.local/documents">
-    <p class="meta">The API returns this network URL plus the archive-relative file path. SMB sharing must be enabled separately on the host.</p>
-  </section>
-  <section class="settings-pane" data-pane="prompts" hidden>
-    <p>Document text is appended automatically. Keep the metadata response JSON-compatible.</p>
-    <label class="editor" for="metadataPrompt">Metadata extraction prompt</label>
-    <textarea id="metadataPrompt"></textarea>
-    <label class="editor" for="summaryPrompt">Full OCR summary prompt</label>
-    <textarea id="summaryPrompt"></textarea>
-  </section>
-  <section class="settings-pane" data-pane="schedule" hidden>
-    <p>Choose a repeating interval or run the background inbox scan at fixed daily times.</p>
-    <label class="editor" for="scheduleMode">Run background scan</label>
-    <select id="scheduleMode">
-      <option value="interval">Every interval</option>
-      <option value="daily">At fixed daily times</option>
-    </select>
-    <div id="intervalSchedule">
-      <label class="editor" for="intervalMinutes">Interval in minutes</label>
-      <input id="intervalMinutes" type="number" min="1" max="10080">
+<dialog id="settingsDialog" class="settings-dialog" aria-labelledby="settingsTitle">
+<form id="settingsForm" class="settings-shell">
+  <header class="settings-header">
+    <h2 id="settingsTitle">Settings</h2>
+    <span class="settings-dirty" id="settingsDirty" hidden>Unsaved changes</span>
+    <button type="button" class="icon-button" id="closeSettings" title="Close (Esc)" aria-label="Close settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </header>
+  <div class="settings-body">
+    <nav class="settings-nav" aria-label="Settings sections">
+      <button type="button" class="settings-tab" data-tab="storage"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>Storage</span></button>
+      <button type="button" class="settings-tab" data-tab="processing"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>Processing</span></button>
+      <button type="button" class="settings-tab" data-tab="ai"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/></svg><span>AI &amp; classification</span></button>
+      <button type="button" class="settings-tab" data-tab="tags"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12l-8 8-9-9V3h8z"/><circle cx="7.5" cy="7.5" r="1.5"/></svg><span>Tags</span></button>
+      <button type="button" class="settings-tab" data-tab="categories"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span>Categories</span></button>
+      <button type="button" class="settings-tab" data-tab="rules"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h6"/></svg><span>Rules</span></button>
+      <button type="button" class="settings-tab" data-tab="integrations"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7l-5 5 5 5M15 7l5 5-5 5"/></svg><span>API &amp; MCP</span></button>
+      <button type="button" class="settings-tab" data-tab="appearance"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"/></svg><span>Appearance</span></button>
+    </nav>
+    <div class="settings-content">
+      <section class="settings-pane" data-pane="storage" hidden>
+        <div class="pane-head"><h3>Storage</h3><p>Where DOGGS picks up new documents and where it files them. Fields marked <span class="lock-badge">.env</span> are fixed by an environment variable on the server.</p></div>
+        <div class="settings-card">
+        <div class="setting">
+          <label for="generalIncoming">Incoming folder<span class="lock-badge" hidden>.env</span></label>
+          <input id="generalIncoming" placeholder="./incoming">
+          <p class="setting-hint">New documents dropped here are processed automatically.</p>
+        </div>
+        <div class="setting">
+          <label for="generalArchive">Archive folder<span class="lock-badge" hidden>.env</span></label>
+          <input id="generalArchive" placeholder="./archive">
+          <p class="setting-hint">Processed documents are filed here in one folder per year.</p>
+        </div>
+          <label class="toggle" for="generalRecursive"><input id="generalRecursive" type="checkbox"><span><strong>Scan subfolders</strong><small>Also pick up documents in folders below the incoming folder.</small></span></label>
+        </div>
+        <div class="settings-card">
+          <h4>Side folders</h4>
+          <div class="setting-grid">
+        <div class="setting">
+          <label for="generalError">Failed documents<span class="lock-badge" hidden>.env</span></label>
+          <input id="generalError" placeholder="./errors">
+        </div>
+        <div class="setting">
+          <label for="generalDuplicate">Duplicates<span class="lock-badge" hidden>.env</span></label>
+          <input id="generalDuplicate" placeholder="./duplicates">
+        </div>
+        <div class="setting">
+          <label for="generalTrash">Trash<span class="lock-badge" hidden>.env</span></label>
+          <input id="generalTrash" placeholder="./trash">
+        </div>
+          </div>
+        </div>
+      </section>
+      <section class="settings-pane" data-pane="processing" hidden>
+        <div class="pane-head"><h3>Processing</h3><p>Text recognition for scans and when the inbox is checked in the background.</p></div>
+        <div class="settings-card">
+          <h4>Text recognition (OCR)</h4>
+        <div class="setting">
+          <label for="generalOcrLang">OCR languages<span class="lock-badge" hidden>.env</span></label>
+          <input id="generalOcrLang" placeholder="deu+eng" list="ocrLanguageList"><datalist id="ocrLanguageList"></datalist>
+          <p class="setting-hint">Tesseract language codes joined with “+”, most important first.</p>
+        </div>
+          <p class="setting-hint" id="ocrInstalled"></p>
+        </div>
+        <div class="settings-card">
+          <h4>Background inbox scan</h4>
+          <div class="segmented" role="radiogroup" aria-label="Schedule mode">
+            <label><input type="radio" name="scheduleMode" value="interval"><span>Every few minutes</span></label>
+            <label><input type="radio" name="scheduleMode" value="daily"><span>At fixed times</span></label>
+          </div>
+          <div class="setting" id="intervalSchedule">
+            <label for="intervalMinutes">Interval</label>
+            <div class="input-suffix"><input id="intervalMinutes" type="number" min="1" max="10080"><span>minutes</span></div>
+          </div>
+          <div class="setting" id="dailySchedule" hidden>
+            <label for="dailyTimes">Daily times</label>
+            <input id="dailyTimes" placeholder="08:00, 18:30">
+            <p class="setting-hint">One or more 24-hour times, separated by commas.</p>
+          </div>
+        </div>
+      </section>
+      <section class="settings-pane" data-pane="ai" hidden>
+        <div class="pane-head"><h3>AI &amp; classification</h3><p>Everything runs locally. The fast classifier files new documents instantly; the LLM is used for summaries and on “Re-extract”.</p></div>
+        <div class="settings-card">
+          <h4>Classification</h4>
+          <div class="setting-grid two">
+        <div class="setting">
+          <label for="generalAiMode">Metadata extraction<span class="lock-badge" hidden>.env</span></label>
+          <select id="generalAiMode"><option value="ollama">Ollama (local LLM)</option><option value="heuristic">Heuristics only</option></select>
+        </div>
+        <div class="setting">
+          <label for="generalClassifier">New documents<span class="lock-badge" hidden>.env</span></label>
+          <select id="generalClassifier"><option value="fast">Fast classifier · LLM on request</option><option value="llm">LLM for every document</option></select>
+        </div>
+          </div>
+        </div>
+        <div class="settings-card">
+          <h4>Ollama</h4>
+          <div class="setting">
+            <label for="generalOllamaUrl">Server URL<span class="lock-badge" hidden>.env</span></label>
+            <div class="input-row"><input id="generalOllamaUrl" placeholder="http://127.0.0.1:11434"><button type="button" class="action" id="testOllama">Test connection</button></div>
+            <p class="setting-hint connection-status" id="ollamaCheck"></p>
+          </div>
+          <div class="setting-grid two">
+        <div class="setting">
+          <label for="generalAiModel">Language model<span class="lock-badge" hidden>.env</span></label>
+          <select id="generalAiModel"></select>
+          <p class="setting-hint">Used for summaries and Re-extract.</p>
+        </div>
+        <div class="setting">
+          <label for="generalEmbedModel">Embedding model<span class="lock-badge" hidden>.env</span></label>
+          <select id="generalEmbedModel"></select>
+          <p class="setting-hint">Powers semantic search; changing it re-indexes the archive.</p>
+        </div>
+          </div>
+        </div>
+        <div class="settings-card">
+          <h4>LLM prompts</h4>
+          <p class="setting-hint">The document text is appended automatically. Keep the metadata answer JSON-compatible.</p>
+          <div class="setting">
+            <div class="label-row"><label for="metadataPrompt">Metadata extraction</label><button type="button" class="link-button" data-reset-prompt="metadata">Reset to default</button></div>
+            <textarea id="metadataPrompt" class="mono" rows="8"></textarea>
+          </div>
+          <div class="setting">
+            <div class="label-row"><label for="summaryPrompt">Full-text summary</label><button type="button" class="link-button" data-reset-prompt="summary">Reset to default</button></div>
+            <textarea id="summaryPrompt" class="mono" rows="6"></textarea>
+          </div>
+        </div>
+      </section>
+      <section class="settings-pane" data-pane="tags" hidden>
+        <div class="pane-head"><h3>Tags</h3><p>Ignored tags are hidden from lists and document headers. Tags you added yourself are never removed.</p></div>
+        <div class="settings-card">
+        <div class="setting">
+          <label for="ignoredTags">Ignored tags<span class="lock-badge" hidden>.env</span></label>
+          <textarea id="ignoredTags" rows="4" placeholder="fpdf, printer"></textarea>
+          <p class="setting-hint">Separate with commas or spaces.</p>
+        </div>
+        </div>
+        <div class="settings-card">
+          <div class="label-row"><h4>Renamed &amp; merged tags</h4><span class="setting-hint" id="tagAliasCount"></span></div>
+          <input id="tagAliasSearch" type="search" placeholder="Filter renamed tags…" aria-label="Filter renamed tags">
+          <div class="tag-alias-list" id="tagAliasList"></div>
+        </div>
+      </section>
+      <section class="settings-pane" data-pane="categories" hidden>
+        <div class="pane-head"><h3>Categories</h3><p>Every document is filed into exactly one of these. One category per line; both the fast classifier and the LLM choose from this list.</p></div>
+        <div class="settings-card fill">
+          <div class="label-row"><label for="categoriesInput">Document categories</label><span class="setting-hint" id="categoryCount"></span></div>
+          <textarea id="categoriesInput" class="mono" placeholder="invoice&#10;banking&#10;tax-office&#10;insurance&#10;contract&#10;personal&#10;misc"></textarea>
+        </div>
+      </section>
+      <section class="settings-pane" data-pane="rules" hidden>
+        <div class="pane-head"><h3>Rules</h3><p>Checked top to bottom while processing; the first enabled rule whose conditions all match sets the category and adds tags. Leave a condition empty to skip it.</p></div>
+        <div class="rule-list" id="ruleList"></div>
+        <button type="button" class="action" id="addRuleButton">+ Add rule</button>
+      </section>
+      <section class="settings-pane" data-pane="integrations" hidden>
+        <div class="pane-head"><h3>API &amp; MCP</h3><p>A read-only API and MCP server so tools like Claude can search your archive. Enabled by setting <code>EXTERNAL_API_TOKEN</code> in the server's <code>.env</code>.</p></div>
+        <div class="settings-card">
+          <div class="label-row"><h4>Access</h4><span class="status-pill" id="apiTokenStatus"></span></div>
+          <div class="setting"><label for="externalApiBase">REST base URL</label><div class="input-row"><input id="externalApiBase" readonly><button type="button" class="action copy-button" data-copy="externalApiBase">Copy</button></div></div>
+          <div class="setting"><label for="externalMcpUrl">MCP endpoint</label><div class="input-row"><input id="externalMcpUrl" readonly><button type="button" class="action copy-button" data-copy="externalMcpUrl">Copy</button></div></div>
+          <div class="setting"><label for="claudeCommand">Add to Claude Code</label><div class="input-row"><input id="claudeCommand" class="mono" readonly><button type="button" class="action copy-button" data-copy="claudeCommand">Copy</button></div><p class="setting-hint">Replace <code>$DOGGS_TOKEN</code> with the token from the server's <code>.env</code>. Claude Desktop: see <code>mcp_stdio.py</code> in the README.</p></div>
+        </div>
+        <div class="settings-card">
+          <div class="label-row"><h4>Search index</h4><span class="status-pill" id="searchIndexState"></span></div>
+          <dl class="stat-grid" id="searchIndexStats"></dl>
+        </div>
+        <div class="settings-card">
+        <div class="setting">
+          <label for="smbShareUrl">SMB share URL<span class="lock-badge" hidden>.env</span></label>
+          <input id="smbShareUrl" placeholder="smb://nas.local/documents">
+          <p class="setting-hint">API results include this URL plus the archive-relative path so clients can open the original file. Sharing must be enabled on the host.</p>
+        </div>
+        </div>
+      </section>
+      <section class="settings-pane" data-pane="appearance" hidden>
+        <div class="pane-head"><h3>Appearance</h3><p>Applied immediately and remembered on this device only.</p></div>
+        <div class="theme-grid" id="themeGrid">
+          <button type="button" class="theme-card" data-theme-choice="auto">
+            <span class="theme-swatch theme-swatch-auto"></span>
+            <span class="theme-name">Automatic</span>
+            <span class="theme-desc">Follows your system's light or dark mode.</span>
+          </button>
+          <button type="button" class="theme-card" data-theme-choice="light">
+            <span class="theme-swatch theme-swatch-light"></span>
+            <span class="theme-name">Light</span>
+            <span class="theme-desc">Always light.</span>
+          </button>
+          <button type="button" class="theme-card" data-theme-choice="dark">
+            <span class="theme-swatch theme-swatch-dark"></span>
+            <span class="theme-name">Dark</span>
+            <span class="theme-desc">Always dark.</span>
+          </button>
+        </div>
+      </section>
     </div>
-    <div id="dailySchedule" hidden>
-      <label class="editor" for="dailyTimes">Daily times</label>
-      <input id="dailyTimes" placeholder="08:00, 18:30">
-      <p class="meta">Use one or more 24-hour times, separated by commas.</p>
-    </div>
-  </section>
-  <section class="settings-pane" data-pane="layout" hidden>
-    <p>Pick the appearance for this browser. The choice is saved on this device only.</p>
-    <h3 class="settings-subhead">Appearance</h3>
-    <div class="theme-grid" id="themeGrid">
-      <button type="button" class="theme-card" data-theme-choice="auto">
-        <span class="theme-swatch theme-swatch-auto"></span>
-        <span class="theme-name">Automatic</span>
-        <span class="theme-desc">Follows your system's light or dark mode.</span>
-      </button>
-      <button type="button" class="theme-card" data-theme-choice="light">
-        <span class="theme-swatch theme-swatch-light"></span>
-        <span class="theme-name">Light</span>
-        <span class="theme-desc">Always light.</span>
-      </button>
-      <button type="button" class="theme-card" data-theme-choice="dark">
-        <span class="theme-swatch theme-swatch-dark"></span>
-        <span class="theme-name">Dark</span>
-        <span class="theme-desc">Always dark.</span>
-      </button>
-    </div>
-  </section>
-  <div class="modal-actions">
-    <button class="action" type="button" id="cancelSettings">Cancel</button>
-    <button class="action primary" type="submit">Save settings</button>
   </div>
+  <footer class="modal-actions">
+    <span class="settings-message" id="settingsMessage" role="status"></span>
+    <button class="action" type="button" id="cancelSettings">Cancel</button>
+    <button class="action primary" type="submit" id="saveSettingsButton">Save</button>
+  </footer>
 </form>
 </dialog>
 <script src="{{ url_for('static', filename='js/app.js', v=asset_version('js/app.js')) }}"></script>
