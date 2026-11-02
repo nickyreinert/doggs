@@ -243,6 +243,10 @@ DOGGS archives these formats and keeps the original file in the archive:
 
 For non-PDF documents, DOGGS reads the first 80 non-empty lines (configurable through `LLM_SOURCE_LINES`), where sender, subject, and letterhead usually are, and sends at most `LLM_INPUT_CHARS` of it to the local LLM; it does not run OCR. Images, and iWork files without extractable text, go through OCR. Formats the browser cannot display open as a text preview with a page image (where available) and a download link.
 
+Office documents, including PowerPoint, Word, Excel, and OpenDocument files, can have a visual PDF preview when LibreOffice is available. DOGGS calls [LibreOffice's headless PDF conversion](https://help.libreoffice.org/latest/en-GB/text/shared/guide/start_parameters.html), using a temporary copy and private profile. The original stays unchanged. One conversion runs at a time, with a bounded queue and a 90-second timeout; completed PDFs are cached in `cache/previews/` (override with `PREVIEW_DIR`). Thumbnails use embedded cover images or an already converted PDF, so browsing a folder does not launch conversions for every card. Previews are static; fonts and complex Office layouts may differ from Microsoft Office. Text preview remains available if conversion fails.
+
+Install the optional renderer on Ubuntu/Debian with `sudo apt-get install --no-install-recommends libreoffice-impress libreoffice-writer libreoffice-calc`, then restart DOGGS. A renderer on `PATH`, an executable set through `LIBREOFFICE_BIN`, or a local `.office/soffice` wrapper is detected at startup. Text extraction itself still requires no LibreOffice.
+
 Unsupported file types remain untouched in the incoming folder and are listed in the pipeline panel.
 
 The **Categories** Settings tab manages the allowed high-level categories. In **fast** mode (Settings → AI & classification → New documents) a built-in classifier assigns one of these in milliseconds and the LLM runs only when you click **Re-extract**; in **LLM** mode the model picks the category for every new document. Categories you set by hand are never overwritten by re-scans and train the fast classifier; categories without built-in German keywords are matched by their own name; the default categories include financial documents, invoices, incoming and outgoing documents, banking, tax office, insurance, contracts, personal documents, and miscellaneous.
@@ -264,14 +268,29 @@ AI_MODE=heuristic
 ## Web UI and pipeline
 
 - The top bar holds free-text search; the collapsible left sidebar filters by year, category, type, tags, and duplicate state (`Ctrl+B` toggles it; on small screens it opens as a drawer).
+- `Ctrl+Y` focuses year filters and `Ctrl+W` focuses category filters. Within year, category, and type filters, arrow keys move focus, `Home`/`End` jump to the first/last option, and `Enter` or `Space` toggles the focused filter.
+- Documents load in batches of 60 as you scroll, with a **Load more documents** button as an alternative. Counts cover all matching documents; duplicate copies are grouped before paging. Arrow-key navigation loads the next batch when needed.
 - Without a selection, documents appear as a full-width thumbnail grid grouped by year. Opening a document switches to a compact list next to the preview (`Ctrl+E` toggles the preview, `Esc` closes it, arrow keys move between documents, `Enter` opens the focused one).
 - Thumbnails of the first PDF page or image are rendered on demand and cached in `cache/thumbs/` (override with `THUMB_DIR`).
-- The detail view edits title, filename, year, summary, OCR text, and custom tags.
+- Cards show a readable title, category, date, short summary, and up to three tags, with custom tags first.
+- The fixed menu button beside sidebar and quick tags provides favorite and rename actions without moving the tag list on hover. Quick tags also offer **Remove from this document** (if assigned) and **Remove from quick tags**; removing a shortcut keeps document tags intact. Renames carry through to Favorites and Latest.
+- **Details → Display title** gives the document your own name independently of the filename and embedded PDF title. Custom titles survive re-extraction and are searchable. Clear the field to restore an automatic title from PDF metadata, the summary, or a readable filename.
+- The detail view also edits filename, year, summary, OCR text, and custom tags. Changing the display title alone leaves the file on disk unchanged.
 - **Settings → Appearance** chooses automatic (follows the system), light, or dark appearance.
 - Duplicate cards open a grid of all copies with per-copy removal.
 - The footer reports Ollama/model state, OCR readiness, queued inbox files, and processing errors.
 - **Re-Scan all** runs first-page OCR and metadata classification for every indexed document.
 - `/?demo=true` shows fake documents and a shared fake PDF for screenshots.
+
+Browsing reads a short-lived in-memory CSV snapshot, invalidated on DOGGS writes or a change to the file's identity, size, or timestamps. The snapshot expires after five seconds to handle external edits on filesystems with coarse timestamps. Edit transactions always read from disk. `/api/index` returns document metadata without `ocr_text`; the UI loads OCR text from `/api/file/<id>/details` for the selected document. Free-text search still includes OCR text.
+
+`/api/index` accepts `limit` (1–200, default 60), `offset` (default 0), and an optional `revision` from the previous response to reject paging through a changing archive with HTTP 409. Its `pagination` object contains the total, year counts, and `next_offset` (null on the last page). ETags allow unchanged background checks to return HTTP 304 without a list payload. Background polling pauses in hidden tabs and avoids refreshing the list while typing; superseded list and document-detail requests are cancelled.
+
+Run the browsing, filter, and CSV edit regression checks with temporary storage:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
 
 ## Troubleshooting
 

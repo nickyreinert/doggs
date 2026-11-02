@@ -16,6 +16,16 @@ from io import BytesIO
 import olefile
 import xlrd
 
+def office_preview_image(path):
+    """Read an embedded Office cover image without launching the renderer."""
+    if not zipfile.is_zipfile(path): return None
+    with zipfile.ZipFile(path) as archive:
+        for name in ("docProps/thumbnail.jpeg", "docProps/thumbnail.jpg", "docProps/thumbnail.png"):
+            try: entry = archive.getinfo(name)
+            except KeyError: continue
+            if entry.file_size <= 10_000_000: return archive.read(entry)
+    return None
+
 OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 

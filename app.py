@@ -30,6 +30,7 @@ from docx import Document
 from classifier import FastClassifier
 import formats
 from search import SearchIndex
+from previews import OFFICE_FORMATS, OfficePreviews
 
 try:
     from pillow_heif import register_heif_opener
@@ -62,6 +63,8 @@ ERROR_DIR = configured_path("ERROR_DIR", BASE_DIR / "errors")
 DUPLICATE_DIR = configured_path("DUPLICATE_DIR", BASE_DIR / "duplicates")
 TRASH_DIR = configured_path("TRASH_DIR", BASE_DIR / "trash")
 THUMB_DIR = configured_path("THUMB_DIR", BASE_DIR / "cache" / "thumbs")
+PREVIEW_DIR = configured_path("PREVIEW_DIR", BASE_DIR / "cache" / "previews")
+OFFICE_PREVIEWS = OfficePreviews(PREVIEW_DIR)
 THUMB_WIDTH = 360
 HOST, PORT = os.getenv("HOST", "0.0.0.0"), int(os.getenv("PORT", "8383"))
 EXTERNAL_API_TOKEN = os.getenv("EXTERNAL_API_TOKEN", "").strip()
@@ -101,10 +104,10 @@ IMAGE_FORMATS = {".png", ".jpg", ".jpeg", ".jfif", ".tif", ".tiff", ".bmp", ".we
 SUPPORTED_FORMATS = {".pdf", *TEXT_FORMATS, *IMAGE_FORMATS}
 # Formats every browser displays inline; everything else gets a generated preview page instead of a download.
 BROWSER_VIEWABLE = {".pdf", ".png", ".jpg", ".jpeg", ".jfif", ".gif", ".webp", ".bmp", ".txt", ".json", ".xml"}
-THUMBNAIL_FORMATS = {".pdf", ".xps", ".oxps", *IMAGE_FORMATS, *IWORK_FORMATS}
+THUMBNAIL_FORMATS = {".pdf", ".xps", ".oxps", *IMAGE_FORMATS, *IWORK_FORMATS, *OFFICE_FORMATS}
 LLM_SOURCE_LINES = int(os.getenv("LLM_SOURCE_LINES", "80"))
 DEFAULT_CATEGORIES = ["financial-document", "invoice", "incoming", "outgoing", "banking", "tax-office", "insurance", "contract", "personal", "misc"]
-FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "category", "category_source", "rule_name", "rule_reason", "summary", "tokens", "removed_tags", "tags", "ocr_text", "is_duplicate", "duplicate_of", "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer", "source", "created_at"]
+FIELDNAMES = ["id", "file_hash", "original_name", "stored_path", "location", "date", "year", "slug", "classification", "category", "category_source", "rule_name", "rule_reason", "summary", "tokens", "removed_tags", "tags", "ocr_text", "is_duplicate", "duplicate_of", "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer", "source", "created_at", "display_title"]
 STOP_TAGS = {"the", "and", "for", "doc", "document", "pdf", "misc", "unknown", "fpdf", "pdflib", "printer", "linux", "php", "kunde", "page", "pages", "creator", "producer"}
 PROMPT_STOP_WORDS = STOP_TAGS | {"a", "an", "are", "as", "at", "be", "by", "from", "in", "is", "it", "of", "on", "or", "that", "this", "to", "with", "der", "die", "das", "den", "dem", "des", "ein", "eine", "einer", "einem", "einen", "und", "oder", "ist", "im", "in", "am", "an", "auf", "von", "für", "mit", "zu", "bei", "als", "auch", "nicht", "wie", "dass"}
 CLASSIFICATION_RULES = [("invoice", ["invoice", "rechnung", "billing", "amount due", "zahlung"]), ("bank", ["bank statement", "kontoauszug", "iban", "balance", "transaction"]), ("insurance", ["insurance", "versicherung", "policy", "claim", "premium"]), ("contract", ["contract", "agreement", "vertrag", "terms"]), ("tax", ["tax", "steuer", "finanzamt", "vat"]), ("medical", ["medical", "arzt", "doctor", "patient"]), ("utility", ["electricity", "gas", "water", "internet", "phone"]), ("salary", ["salary", "payroll", "gehalt", "lohn"]), ("official", ["authority", "bescheid", "government", "court"]), ("receipt", ["receipt", "quittung", "purchase"])]
@@ -117,6 +120,8 @@ if CSV_PATH.exists() and CSV_PATH.is_dir():
 app, CSV_LOCK, SCAN_LOCK = Flask(__name__), threading.RLock(), threading.Lock()
 WORKER_STARTED = False
 STATUS_CACHE = {"checked_at": 0.0, "payload": None}
+INDEX_CACHE = {"signature": None, "rows": (), "loaded_at": 0.0}
+INDEX_CACHE_SECONDS = 5  # Bound staleness on NAS filesystems with coarse timestamps.
 PIPELINE_STATE = {"processing": "", "last_scan": "", "last_error": "", "unsupported": [], "processed": 0, "paused": False}
 FULL_SCAN_STATE = {}
 OCR_SCAN_STATE = {}
@@ -174,11 +179,12 @@ def ensure_csv():
         with CSV_PATH.open("w", newline="", encoding="utf-8") as f: csv.DictWriter(f, fieldnames=FIELDNAMES).writeheader()
         return
     with CSV_PATH.open(newline="", encoding="utf-8") as f:
-        existing = list(csv.DictReader(f)); existing_fields = f.seek(0) or next(csv.reader(f), [])
+        existing_fields = next(csv.reader(f), [])
+        if existing_fields == FIELDNAMES: return
+        f.seek(0)
+        existing = list(csv.DictReader(f))
     if existing_fields != FIELDNAMES:
-        with CSV_PATH.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore")
-            writer.writeheader(); writer.writerows(existing)
+        save_index(existing)
 
 def save_index(rows):
     """Write the index to a temp file and swap it in, so sync clients and readers never see a half-written CSV."""
@@ -186,12 +192,26 @@ def save_index(rows):
     with temporary.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore"); writer.writeheader(); writer.writerows(rows)
     os.replace(temporary, CSV_PATH)
+    INDEX_CACHE.update(signature=None, rows=())
 
-def read_rows():
+def index_signature():
+    stat = CSV_PATH.stat()
+    return (str(CSV_PATH), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+def read_rows(refresh=False):
     with CSV_LOCK:
+        try: signature = index_signature()
+        except FileNotFoundError: signature = None
+        if not refresh and signature is not None and signature == INDEX_CACHE["signature"] and time.monotonic() - INDEX_CACHE["loaded_at"] < INDEX_CACHE_SECONDS:
+            return [dict(row) for row in INDEX_CACHE["rows"]]
         ensure_dirs(); ensure_csv()
+        signature = index_signature()
         with CSV_PATH.open(newline="", encoding="utf-8") as f:
-            return [{field: row.get(field, "") for field in FIELDNAMES} for row in csv.DictReader(f)]
+            rows = [{field: row.get(field, "") for field in FIELDNAMES} for row in csv.DictReader(f)]
+        content_hash = hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest()
+        INDEX_CACHE.update(signature=signature, rows=rows, loaded_at=time.monotonic(), content_hash=content_hash)
+        # Callers mutate their rows before committing; never expose cached dictionaries.
+        return [dict(row) for row in rows]
 
 def write_rows(rows):
     with CSV_LOCK:
@@ -202,15 +222,16 @@ def index_transaction(function):
     """Hold the index lock for a whole read-modify-write so concurrent pipeline/UI writes cannot overwrite each other."""
     @functools.wraps(function)
     def wrapper(*args, **kwargs):
-        with CSV_LOCK: return function(*args, **kwargs)
+        with CSV_LOCK:
+            # Transactions start from disk even if an external editor preserved timestamps.
+            INDEX_CACHE.update(signature=None, rows=())
+            return function(*args, **kwargs)
     return wrapper
 
 def mutate_row(row_id, mutation):
     """Atomically update one indexed row without overwriting newer user edits."""
     with CSV_LOCK:
-        ensure_dirs(); ensure_csv()
-        with CSV_PATH.open(newline="", encoding="utf-8") as f:
-            rows = [{field: row.get(field, "") for field in FIELDNAMES} for row in csv.DictReader(f)]
+        rows = read_rows(refresh=True)
         row = next((item for item in rows if item.get("id") == row_id), None)
         if not row: return None
         mutation(row)
@@ -255,8 +276,8 @@ def read_settings():
     rules = [normalize_rule(rule) for rule in data.get("rules", []) if isinstance(rule, dict)]
     external_api = data.get("external_api") if isinstance(data.get("external_api"), dict) else {}
     share_url = str(external_api.get("smb_share_url") or "").strip().rstrip("/")
-    favorite_tags = list(dict.fromkeys(slugify(tag) for tag in tag_values(data.get("favorite_tags", [])) if slugify(tag) != "document"))
-    recent_tags = list(dict.fromkeys(slugify(tag) for tag in tag_values(data.get("recent_tags", [])) if slugify(tag) != "document"))[:MAX_RECENT_TAGS]
+    favorite_tags = list(dict.fromkeys(canonical_tag(slugify(tag), aliases) for tag in tag_values(data.get("favorite_tags", [])) if slugify(tag) != "document"))
+    recent_tags = list(dict.fromkeys(canonical_tag(slugify(tag), aliases) for tag in tag_values(data.get("recent_tags", [])) if slugify(tag) != "document"))[:MAX_RECENT_TAGS]
     return {"ignored_tags": sorted(set(tag_values(data.get("ignored_tags", []))),), "favorite_tags": favorite_tags, "recent_tags": recent_tags, "tag_aliases": aliases, "categories": categories, "rules": rules, "external_api": {"port": PORT, "token_configured": bool(EXTERNAL_API_TOKEN), "smb_share_url": share_url}, "general": general, "general_configured": general_is_configured(raw_general), "general_locked": general_locked_fields(), "prompts": {"metadata": metadata_prompt, "summary": str(prompts.get("summary") or DEFAULT_SUMMARY_PROMPT)}, "schedule": {"mode": "daily" if schedule.get("mode") == "daily" else "interval", "interval_minutes": max(1, min(10080, int(schedule.get("interval_minutes", max(1, POLL_SECONDS // 60)) or 1))), "daily_times": sorted(set(times))}}
 
 MAX_RECENT_TAGS = 12
@@ -355,20 +376,25 @@ def save_tag_alias(tag, canonical):
     if not tag or not canonical or tag == canonical: return
     settings = read_settings(); settings["tag_aliases"][tag] = canonical; write_settings(settings)
 
-def inferred_tags(row):
-    aliases = tag_aliases()
-    ignored = {canonical_tag(tag, aliases) for tag in ignored_tags()}
+def inferred_tags(row, settings=None):
+    settings = read_settings() if settings is None else settings
+    aliases = settings["tag_aliases"]
+    ignored = {canonical_tag(tag, aliases) for tag in settings["ignored_tags"]}
     removed = {canonical_tag(tag, aliases) for tag in tag_values(row.get("removed_tags", ""))}
     base = tag_values(row.get("tokens", "")) or tag_values(row.get("slug", ""))
     tags = (canonical_tag(tag, aliases) for tag in base)
     return list(dict.fromkeys(tag for tag in tags if tag not in STOP_TAGS and tag not in ignored and tag not in removed))
 
-def custom_tags(row):
-    aliases = tag_aliases()
+def custom_tags(row, settings=None):
+    aliases = (read_settings() if settings is None else settings)["tag_aliases"]
     return list(dict.fromkeys(canonical_tag(tag, aliases) for tag in tag_values(row.get("tags", ""))))
-def row_tags(row): return set(inferred_tags(row) + custom_tags(row))
-def document_tags(row):
-    inferred, custom = inferred_tags(row), custom_tags(row)
+def row_tags(row, settings=None):
+    settings = read_settings() if settings is None else settings
+    return set(inferred_tags(row, settings) + custom_tags(row, settings))
+
+def document_tags(row, settings=None):
+    settings = read_settings() if settings is None else settings
+    inferred, custom = inferred_tags(row, settings), custom_tags(row, settings)
     return [{"value": tag, "kind": "inferred"} for tag in inferred if tag not in custom] + [{"value": tag, "kind": "custom"} for tag in custom]
 
 def unique_path(path):
@@ -1246,7 +1272,9 @@ def full_text_for_row(row):
     return text[:SEARCH_MAX_CHARS]
 
 def search_description(row):
-    return Path(row.get("stored_path", "")).name, sorted(row_tags(row))
+    name = Path(row.get("stored_path", "")).name
+    if row.get("display_title"): name = f"{row['display_title']} {name}"
+    return name, sorted(row_tags(row))
 
 SEARCH = SearchIndex(SEARCH_DB_PATH, full_text_for_row, OLLAMA_URL, EMBED_MODEL, enabled=AI_MODE != "heuristic" and bool(EMBED_MODEL))
 
@@ -1269,7 +1297,12 @@ def search_loop():
 
 def search_rows(rows, query):
     terms = query.lower().split()
-    return [row for row in rows if all(term in " ".join(row.get(key, "") for key in FIELDNAMES).lower() for term in terms)]
+    if not terms: return list(rows)
+    matches = []
+    for row in rows:
+        text = " ".join(row.get(key, "") for key in FIELDNAMES).lower()
+        if all(term in text for term in terms): matches.append(row)
+    return matches
 
 def external_api_authorized():
     """Require a configured bearer token for integrations outside the DOGGS UI."""
@@ -1295,13 +1328,31 @@ def duplicate_counts_by_original(rows):
     sizes = Counter(duplicate_group_id(row) for row in rows)
     return {group_id: size - 1 for group_id, size in sizes.items() if size > 1}
 
-def serialize_row(row, duplicate_counts=None):
+def document_title(row):
+    """A user-owned title, with a readable fallback for documents not yet named."""
+    title = str(row.get("display_title") or "").strip()
+    if title: return title
+    metadata_title = re.sub(r"\s+", " ", row.get("pdf_title") or "").strip()
+    if metadata_title and metadata_title.lower() not in {"untitled", "unknown", "document", "pdf", "scan", "scanner", "microsoft word", "microsoft print to pdf"}:
+        return metadata_title
+    summary = re.sub(r"\s+", " ", row.get("summary") or "").strip()
+    if summary:
+        sentence = re.split(r"(?<=[.!?])\s+", summary, maxsplit=1)[0]
+        if len(sentence) <= 100: return sentence
+        return sentence[:97].rsplit(" ", 1)[0].rstrip(".,;:") + "…"
+    stem = Path(row.get("stored_path") or row.get("original_name") or "").stem
+    stem = re.sub(r"^\d{4}-\d{2}-\d{2}[_ -]*", "", stem)
+    return re.sub(r"[_-]+", " ", stem).strip() or "Untitled document"
+
+def serialize_row(row, duplicate_counts=None, settings=None, include_text=True):
     duplicate_count = (duplicate_counts or {}).get(duplicate_group_id(row), 0)
     document_type = Path(row.get("stored_path", row.get("original_name", ""))).suffix.lower().removeprefix(".") or "unknown"
     row_id = quote(row.get('id', ''))
     thumb_url = f"/thumb?id={row_id}&v={quote(row.get('file_hash', '')[:16])}" if f".{document_type}" in THUMBNAIL_FORMATS else ""
+    if f".{document_type}" in OFFICE_FORMATS: thumb_url += f"&render={OFFICE_PREVIEWS.generation}"
     preview_url = f"/file?id={row_id}" if f".{document_type}" in BROWSER_VIEWABLE else f"/preview?id={row_id}"
-    return {**row, "name": Path(row.get("stored_path", "")).name, "type": document_type, "document_tags": document_tags(row), "url": f"/file?id={row_id}", "preview_url": preview_url, "thumb_url": thumb_url, "duplicate_count": duplicate_count, "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "ocr_scan": OCR_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})}
+    data = row if include_text else {key: value for key, value in row.items() if key != "ocr_text"}
+    return {**data, "title": document_title(row), "name": Path(row.get("stored_path", "")).name, "type": document_type, "document_tags": document_tags(row, settings), "url": f"/file?id={row_id}", "preview_url": preview_url, "thumb_url": thumb_url, "duplicate_count": duplicate_count, "full_scan": FULL_SCAN_STATE.get(row.get("id"), {}), "ocr_scan": OCR_SCAN_STATE.get(row.get("id"), {}), "normal_scan": NORMAL_SCAN_STATE.get(row.get("id"), {})}
 
 def demo_document_rows():
     """Return screenshot-friendly sample records without writing to the real archive."""
@@ -1323,8 +1374,8 @@ def demo_document_rows():
             rows.append({**original, "id": f"demo-{key}-copy-{copy_number}", "original_name": copy_filename, "stored_path": copy_filename, "location": "duplicates", "is_duplicate": "1", "duplicate_of": original["id"], "created_at": f"{document_date}T09:{30 + copy_number}:00+00:00"})
     return rows
 
-def serialize_demo_row(row, duplicate_counts):
-    data = serialize_row(row, duplicate_counts)
+def serialize_demo_row(row, duplicate_counts, **kwargs):
+    data = serialize_row(row, duplicate_counts, **kwargs)
     data["url"] = "/demo-document.pdf"
     data["thumb_url"] = "/thumb?id=demo"
     return data
@@ -1363,9 +1414,10 @@ def demo_pdf_bytes():
 @app.get("/api/tags")
 def api_tags():
     """Tag suggestions across the whole archive: prefix matches first, then substring matches, by usage."""
-    needle = canonical_tag(request.args.get("q", "").strip().lower(), tag_aliases()).lower()
-    counts = Counter(tag for row in read_rows() for tag in row_tags(row))
-    favorites = set(read_settings()["favorite_tags"])
+    settings = read_settings()
+    needle = canonical_tag(request.args.get("q", "").strip().lower(), settings["tag_aliases"]).lower()
+    counts = Counter(tag for row in read_rows() for tag in row_tags(row, settings))
+    favorites = set(settings["favorite_tags"])
     for tag in favorites: counts.setdefault(tag, 0)
     matches = [(tag, count) for tag, count in counts.items() if not needle or needle in tag.lower()]
     matches.sort(key=lambda item: (not item[0].lower().startswith(needle), item[0] not in favorites, -item[1], item[0]))
@@ -1373,27 +1425,88 @@ def api_tags():
 
 @app.route("/api/index")
 def api_index():
-    query = request.args.get("q", "").strip(); years = set(filter(None, request.args.get("years", "").split(","))); categories = set(filter(None, request.args.get("categories", "").split(","))); types = set(filter(None, request.args.get("types", "").lower().split(","))); duplicates = request.args.get("duplicates") == "1"; demo = request.args.get("demo") == "true"; rows = demo_document_rows() if demo else read_rows()
-    # Requested tokens may reference a tag that was since renamed/merged; resolve them to their current canonical value.
-    aliases = tag_aliases()
-    tokens = {canonical_tag(token, aliases) for token in filter(None, request.args.get("tokens", "").split(","))}
+    query = request.args.get("q", "").strip()
+    years = set(filter(None, request.args.get("years", "").split(",")))
+    categories = set(filter(None, request.args.get("categories", "").split(",")))
+    types = set(filter(None, request.args.get("types", "").lower().split(",")))
+    duplicates = request.args.get("duplicates") == "1"
+    demo = request.args.get("demo") == "true"
+    rows = demo_document_rows() if demo else read_rows()
+    settings = read_settings()
+    try:
+        limit = int(request.args.get("limit", "60"))
+        offset = int(request.args.get("offset", "0"))
+    except ValueError:
+        abort(400, "limit and offset must be integers")
+    if not 1 <= limit <= 200 or offset < 0:
+        abort(400, "limit must be 1–200 and offset must be nonnegative")
+    revision = hashlib.sha256(json.dumps([
+        "demo" if demo else [index_signature(), INDEX_CACHE.get("content_hash")], settings,
+        FULL_SCAN_STATE, OCR_SCAN_STATE, NORMAL_SCAN_STATE, OFFICE_PREVIEWS.generation,
+    ], sort_keys=True).encode()).hexdigest()
+    if request.args.get("revision") and request.args["revision"] != revision:
+        return jsonify({"error": "The document list changed; reload the first page."}), 409
+    etag = hashlib.sha256(json.dumps([revision, request.args.to_dict(flat=False)], sort_keys=True).encode()).hexdigest()
+    if request.if_none_match.contains(etag):
+        response = app.response_class(status=304)
+        response.set_etag(etag)
+        return response
+    # Resolve old names against one consistent settings snapshot for the request.
+    tokens = {canonical_tag(token, settings["tag_aliases"]) for token in filter(None, request.args.get("tokens", "").split(","))}
     selected_id = request.args.get("document", "").strip()
     duplicate_hashes = {value for value, count in Counter(row.get("file_hash") for row in rows if row.get("file_hash")).items() if count > 1}
-    document_type = lambda row: Path(row.get("stored_path", row.get("original_name", ""))).suffix.lower().removeprefix(".") or "unknown"
-    searched = search_rows(rows, query); files = [row for row in searched if (not years or row.get("year") in years) and (not categories or row.get("category") in categories) and (not types or document_type(row) in types) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
-    year_rows = [row for row in searched if (not categories or row.get("category") in categories) and (not types or document_type(row) in types) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
-    category_rows = [row for row in searched if (not years or row.get("year") in years) and (not types or document_type(row) in types) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
-    type_rows = [row for row in searched if (not years or row.get("year") in years) and (not categories or row.get("category") in categories) and (not tokens or tokens.issubset(row_tags(row))) and (not duplicates or row.get("file_hash") in duplicate_hashes)]
-    tag_rows = [row for row in type_rows if not types or document_type(row) in types]
-    counts = Counter(tag for row in tag_rows for tag in row_tags(row))
-    files.sort(key=lambda row: (row.get("date", ""), row.get("stored_path", "")), reverse=True)
+    files = []
+    year_counts, category_counts, type_counts, tag_counts = Counter(), Counter(), Counter(), Counter()
+    for row in search_rows(rows, query):
+        if duplicates and row.get("file_hash") not in duplicate_hashes: continue
+        document_type = Path(row.get("stored_path", row.get("original_name", ""))).suffix.lower().removeprefix(".") or "unknown"
+        tags = row_tags(row, settings)
+        if tokens and not tokens.issubset(tags): continue
+        year_matches = not years or row.get("year") in years
+        category_matches = not categories or row.get("category") in categories
+        type_matches = not types or document_type in types
+        # Each facet excludes its own filter so alternative values stay available.
+        if category_matches and type_matches and row.get("year"):
+            year_counts[row["year"]] += 1
+        if year_matches and type_matches and row.get("category"):
+            category_counts[row["category"]] += 1
+        if year_matches and category_matches:
+            type_counts[document_type] += 1
+            if type_matches:
+                tag_counts.update(tags)
+                files.append(row)
+    files.sort(key=lambda row: (row.get("year") or "unknown", row.get("date", ""), row.get("stored_path", "")), reverse=True)
+    # Collapse duplicates before pagination, including originals on another page.
+    matching_ids = {row.get("id") for row in files}
+    files = [row for row in files if not (row.get("is_duplicate") and row.get("duplicate_of") in matching_ids)]
+    total = len(files)
+    group_counts = Counter(row.get("year") or "unknown" for row in files)
+    page = files[offset:offset + limit]
     selected_row = next((row for row in rows if row.get("id") == selected_id), None)
     duplicate_counts = duplicate_counts_by_original(rows)
     serializer = serialize_demo_row if demo else serialize_row
-    category_counts = Counter(row.get("category") for row in category_rows if row.get("category"))
-    category_values = list(dict.fromkeys(read_settings()["categories"] + sorted(category_counts)))
-    type_counts = Counter(document_type(row) for row in type_rows)
-    return jsonify({"years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(Counter(row.get("year") for row in year_rows if row.get("year")).items(), reverse=True)], "categories": [{"value": value, "count": category_counts[value], "selected": value in categories} for value in category_values], "types": [{"value": value, "count": count, "selected": value in types} for value, count in sorted(type_counts.items())], "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in counts.most_common(MAX_TOKEN_FACETS)], "duplicates_count": len(duplicate_hashes), "favorite_tags": read_settings()["favorite_tags"], "recent_tags": read_settings()["recent_tags"], "files": [serializer(row, duplicate_counts) for row in files], "selected_file": serializer(selected_row, duplicate_counts) if selected_row else None})
+    category_values = list(dict.fromkeys(settings["categories"] + sorted(category_counts)))
+    # OCR text is fetched from /details for the selected document, not for every card.
+    def serialize(row):
+        return serializer(row, duplicate_counts, settings=settings, include_text=False)
+    response = jsonify({
+        "years": [{"value": value, "count": count, "selected": value in years} for value, count in sorted(year_counts.items(), reverse=True)],
+        "categories": [{"value": value, "count": category_counts[value], "selected": value in categories} for value in category_values],
+        "types": [{"value": value, "count": count, "selected": value in types} for value, count in sorted(type_counts.items())],
+        "tags": [{"value": value, "count": count, "selected": value in tokens} for value, count in tag_counts.most_common(MAX_TOKEN_FACETS)],
+        "duplicates_count": len(duplicate_hashes),
+        "favorite_tags": settings["favorite_tags"],
+        "recent_tags": settings["recent_tags"],
+        "files": [serialize(row) for row in page],
+        "selected_file": serialize(selected_row) if selected_row else None,
+        "revision": revision,
+        "pagination": {"offset": offset, "limit": limit, "total": total,
+                       "next_offset": offset + len(page) if offset + len(page) < total else None,
+                       "year_counts": group_counts},
+    })
+    response.set_etag(etag)
+    response.headers["Cache-Control"] = "private, no-cache"
+    return response
 
 @app.get("/api/external/v1/catalog")
 def external_catalog():
@@ -1586,6 +1699,7 @@ def update_file(row_id):
         if category != row.get("category"): row["category_source"] = "manual" if category else ""
         row["category"] = category
     if "title" in payload: row["pdf_title"] = re.sub(r"\s+", " ", str(payload["title"])).strip()[:500]
+    if "display_title" in payload: row["display_title"] = re.sub(r"\s+", " ", str(payload["display_title"] or "")).strip()[:500]
     if "summary" in payload: row["summary"] = str(payload["summary"]).strip()[:4000]
     if "year" in payload or "filename" in payload:
         current_path = file_path_for_row(row)
@@ -1640,13 +1754,13 @@ def clean_duplicates():
     return jsonify({"ok": True, "removed": len(duplicate_rows)})
 
 @app.route("/api/file/<row_id>/details", methods=["GET", "POST"])
-@index_transaction
 def file_details(row_id):
-    rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
-    if not row: abort(404)
     if request.method == "POST":
-        row["ocr_text"] = str((request.get_json(silent=True) or {}).get("ocr_text", ""))[:MAX_FULL_TEXT_CHARS]
-        write_rows(rows)
+        text = str((request.get_json(silent=True) or {}).get("ocr_text", ""))[:MAX_FULL_TEXT_CHARS]
+        row = mutate_row(row_id, lambda item: item.update(ocr_text=text))
+    else:
+        row = next((item for item in read_rows() if item.get("id") == row_id), None)
+    if not row: abort(404)
     metadata = {key.removeprefix("pdf_"): row.get(key, "") for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords", "pdf_creator", "pdf_producer") if row.get(key)}
     return jsonify({"ocr_text": row.get("ocr_text", ""), "full_path": str(file_path_for_row(row)), "metadata": metadata, "rule_name": row.get("rule_name", ""), "rule_reason": row.get("rule_reason", ""), "ocr_scan": OCR_SCAN_STATE.get(row_id, {}), "normal_scan": NORMAL_SCAN_STATE.get(row_id, {})})
 
@@ -1672,13 +1786,22 @@ def add_file_tag(row_id):
 
 @app.post("/api/tags/<tag>/favorite")
 def set_favorite_tag(tag):
-    tag = slugify(tag)
+    tag = canonical_tag(slugify(tag))
     if tag == "document": abort(400, "Enter a tag.")
     favorite = bool((request.get_json(silent=True) or {}).get("favorite", True))
     settings = read_settings()
     settings["favorite_tags"] = [value for value in settings["favorite_tags"] if value != tag] + ([tag] if favorite else [])
     write_settings(settings)
     return jsonify({"ok": True, "favorite_tags": settings["favorite_tags"]})
+
+@app.delete("/api/tags/<tag>/quick")
+def remove_quick_tag(tag):
+    settings = read_settings()
+    tag = canonical_tag(slugify(tag), settings["tag_aliases"])
+    for key in ("favorite_tags", "recent_tags"):
+        settings[key] = [value for value in settings[key] if value != tag]
+    write_settings(settings)
+    return jsonify({"favorite_tags": settings["favorite_tags"], "recent_tags": settings["recent_tags"]})
 
 @app.post("/api/files/bulk")
 @index_transaction
@@ -1703,11 +1826,12 @@ def bulk_update_files():
 @app.delete("/api/file/<row_id>/tags/<tag>")
 @index_transaction
 def remove_file_tag(row_id, tag):
-    tag = slugify(tag); rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
+    tag = canonical_tag(slugify(tag)); rows = read_rows(); row = next((item for item in rows if item.get("id") == row_id), None)
     if not row: abort(404)
-    if request.args.get("kind") == "custom":
+    kind = request.args.get("kind")
+    if kind in {"custom", "all"}:
         row["tags"] = " ".join(value for value in custom_tags(row) if value != tag)
-    else:
+    if kind != "custom":
         row["removed_tags"] = " ".join(dict.fromkeys(tag_values(row.get("removed_tags", "")) + [tag]))
     write_rows(rows)
     return jsonify({"ok": True, "tags": document_tags(row)})
@@ -1921,6 +2045,17 @@ def serve_preview():
     if not full_path.is_file(): abort(404)
     suffix, row_id = full_path.suffix.lower(), quote(row.get("id", ""))
     if suffix in BROWSER_VIEWABLE: return redirect(f"/file?id={row_id}")
+    preview_note = ""
+    if suffix in OFFICE_FORMATS:
+        state, pdf = OFFICE_PREVIEWS.request(full_path)
+        if state == "ready":
+            return send_file(pdf, mimetype="application/pdf", download_name=full_path.stem + ".pdf", max_age=0)
+        if state in {"queued", "rendering", "busy"}:
+            page = '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta http-equiv="refresh" content="2"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Preparing preview</title></head><body style="font:15px system-ui;padding:32px;color:#475569"><h2>Preparing document preview…</h2><p>The preview will appear here when it is ready.</p><p><a href="/file?id=' + row_id + '" download>Download original</a></p></body></html>'
+            response = app.response_class(page, mimetype="text/html")
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        preview_note = '<p class="empty">Visual preview is unavailable. Showing extracted text instead.</p>'
     image = f'<img alt="" src="/thumb?id={row_id}&size=large">' if suffix in THUMBNAIL_FORMATS else ""
     text = ""
     if suffix not in IMAGE_FORMATS:
@@ -1928,7 +2063,7 @@ def serve_preview():
         except Exception: log.warning("Could not read text for preview of %s", full_path)
         text = re.sub(r"\n{3,}", "\n\n", text.strip())[:200_000]
     body = f"<pre>{html.escape(text)}</pre>" if text else ("" if image else '<p class="empty">No readable text found in this document.</p>')
-    return PREVIEW_PAGE.format(title=html.escape(full_path.name), url=f"/file?id={row_id}", image=image, body=body)
+    return PREVIEW_PAGE.format(title=html.escape(full_path.name), url=f"/file?id={row_id}", image=image, body=preview_note + body)
 
 def render_thumbnail(open_document, width=THUMB_WIDTH):
     with open_document() as doc:
@@ -1957,7 +2092,9 @@ def serve_thumbnail():
     suffix = full_path.suffix.lower()
     if not full_path.is_file() or suffix not in THUMBNAIL_FORMATS: abort(404)
     width = 1400 if request.args.get("size") == "large" else THUMB_WIDTH
+    office_pdf = OFFICE_PREVIEWS.cached(full_path) if suffix in OFFICE_FORMATS else None
     cache_key = re.sub(r"[^0-9a-f]", "", row.get("file_hash", "").lower()) or hashlib.sha256(str(full_path).encode()).hexdigest()
+    if office_pdf: cache_key += "-rendered"
     cache_path = THUMB_DIR / f"{cache_key}-{width}.jpg"
     if not cache_path.is_file():
         try:
@@ -1965,6 +2102,12 @@ def serve_thumbnail():
                 preview = formats.iwork_preview_image(full_path)
                 data = render_image_thumbnail(BytesIO(preview), width) if preview else None
             elif suffix in IMAGE_FORMATS: data = render_image_thumbnail(full_path, width)
+            elif suffix in OFFICE_FORMATS:
+                if office_pdf:
+                    data = render_thumbnail(lambda: fitz.open(office_pdf), width)
+                else:
+                    preview = formats.office_preview_image(full_path)
+                    data = render_image_thumbnail(BytesIO(preview), width) if preview else None
             else: data = render_thumbnail(lambda: fitz.open(full_path), width)
         except Exception:
             log.warning("Could not render thumbnail for %s", full_path); abort(404)

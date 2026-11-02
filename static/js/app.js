@@ -87,8 +87,10 @@ function restoreUrlState() {
   if (!settings && $('settingsDialog').open) $('settingsDialog').close();
 }
 
-let refreshRequest = 0;
-async function refresh() {
+const PAGE_SIZE = 60;
+let refreshRequest = 0, refreshController, refreshBusy = false;
+const browse = { key: '', revision: '', etag: '', pagination: null, loading: false };
+function browseParams() {
   const p = new URLSearchParams();
   if (state.q) p.set('q', state.q);
   if (state.years.size) p.set('years', [...state.years].join(','));
@@ -97,36 +99,122 @@ async function refresh() {
   if (state.tags.size) p.set('tokens', [...state.tags].join(','));
   if (state.duplicates) p.set('duplicates', '1');
   if (state.demo) p.set('demo', 'true');
+  p.set('limit', PAGE_SIZE);
+  return p;
+}
+async function refresh({ background = false } = {}) {
+  if (background && (refreshBusy || browse.loading || document.hidden)) return;
+  const p = browseParams(), filterKey = p.toString();
+  const sameFilters = filterKey === browse.key;
+  const targetCount = sameFilters ? Math.max(PAGE_SIZE, files.length) : PAGE_SIZE;
   const selectedId = state.selected?.id || state.requestedDocument;
   if (selectedId) p.set('document', selectedId);
   const request = ++refreshRequest;
-  const r = await fetch('/api/index?' + p);
-  if (!r.ok || request !== refreshRequest) return;
-  const d = await r.json();
-  if (request !== refreshRequest) return;  // a newer refresh (e.g. after a tag edit) superseded this one
-  availableYears = (d.years || []).map(i => i.value);
-  availableCategories = (d.categories || []).map(i => i.value);
-  favoriteTags = d.favorite_tags || [];
-  recentTags = d.recent_tags || [];
-  renderFacet('years', d.years || [], state.years, 'All years');
-  renderFacet('categories', d.categories || [], state.categories, 'All categories', value => value, (ids, category) => bulkUpdate(ids, { category }, category));
-  renderFacet('types', d.types || [], state.types, 'All', value => value.toUpperCase());
-  renderTags(d.tags || []);
-  $('duplicateCount').textContent = d.duplicates_count || 0;
-  renderFiles(d.files || []);
-  if (selectedId && $('duplicatesView').classList.contains('open') && !state.requestedDocument) return;
-  if (selectedId) {
-    const f = files.find(x => x.id === selectedId) || d.selected_file;
-    if (f) {
-      const load = !!state.requestedDocument;
-      state.requestedDocument = '';
-      selectFile(f, load, false);
-    } else if (!selectFirstFile()) {
-      clearSelection(false);
-      syncUrl();
+  refreshController?.abort();
+  refreshController = new AbortController();
+  const signal = refreshController.signal;
+  refreshBusy = true;
+  browse.loading = false;
+  updateLoadMore();
+  try {
+    const headers = background && sameFilters && browse.etag ? { 'If-None-Match': browse.etag } : {};
+    const r = await fetch('/api/index?' + p, { signal, headers });
+    if (r.status === 304 || !r.ok || request !== refreshRequest) return;
+    const d = await r.json();
+    if (request !== refreshRequest) return;
+    const list = [...d.files];
+    let pagination = d.pagination;
+    // Keep the user's loaded range when real archive changes arrive in the background.
+    while (pagination.next_offset != null && list.length < targetCount) {
+      const next = new URLSearchParams(p);
+      next.set('offset', pagination.next_offset);
+      next.set('revision', d.revision);
+      const pageResponse = await fetch('/api/index?' + next, { signal });
+      if (!pageResponse.ok) break;
+      const page = await pageResponse.json();
+      if (request !== refreshRequest) return;
+      list.push(...page.files);
+      pagination = page.pagination;
     }
-  } else if (!selectFirstFile()) {
-    syncUrl();
+    browse.key = filterKey;
+    browse.revision = d.revision;
+    browse.etag = r.headers.get('ETag');
+    browse.pagination = pagination;
+    availableYears = (d.years || []).map(i => i.value);
+    availableCategories = (d.categories || []).map(i => i.value);
+    favoriteTags = d.favorite_tags || [];
+    recentTags = d.recent_tags || [];
+    renderFacet('years', d.years || [], state.years, 'All years');
+    renderFacet('categories', d.categories || [], state.categories, 'All categories', value => value, (ids, category) => bulkUpdate(ids, { category }, category));
+    renderFacet('types', d.types || [], state.types, 'All', value => value.toUpperCase());
+    renderTags(d.tags || []);
+    $('duplicateCount').textContent = d.duplicates_count || 0;
+    renderFiles(list);
+    if (!sameFilters) $('files').scrollTop = 0;
+    if (selectedId && $('duplicatesView').classList.contains('open') && !state.requestedDocument) return;
+    if (selectedId) {
+      const f = files.find(x => x.id === selectedId) || (d.selected_file?.id === selectedId ? d.selected_file : null);
+      if (f) {
+        const load = !!state.requestedDocument;
+        state.requestedDocument = '';
+        selectFile(f, load, false);
+      } else if (!selectFirstFile()) {
+        clearSelection(false);
+        syncUrl();
+      }
+    } else if (!selectFirstFile()) syncUrl();
+  } catch (error) {
+    if (error.name !== 'AbortError') showToast('Could not load documents. Try again.');
+  } finally {
+    if (request === refreshRequest) { refreshBusy = false; updateLoadMore() }
+  }
+}
+
+function updateLoadMore() {
+  let button = $('loadMore');
+  if (!button) {
+    button = document.createElement('button');
+    button.id = 'loadMore';
+    button.type = 'button';
+    button.className = 'load-more';
+    button.onclick = () => loadMore();
+    $('files').append(button);
+  }
+  button.hidden = browse.pagination?.next_offset == null;
+  button.disabled = refreshBusy || browse.loading;
+  button.textContent = browse.loading ? 'Loading…' : 'Load more documents';
+  button.setAttribute('aria-label', button.textContent);
+}
+let moreRequest;
+function loadMore() {
+  // Scrolling and keyboard navigation can request the same batch at once.
+  if (moreRequest?.generation === refreshRequest) return moreRequest.promise;
+  const pending = { generation: refreshRequest };
+  pending.promise = fetchMore().finally(() => { if (moreRequest === pending) moreRequest = null });
+  moreRequest = pending;
+  return pending.promise;
+}
+async function fetchMore() {
+  if (refreshBusy || browse.loading || browse.pagination?.next_offset == null || browse.key !== browseParams().toString()) return;
+  const request = refreshRequest;
+  browse.loading = true;
+  updateLoadMore();
+  try {
+    const p = browseParams();
+    p.set('offset', browse.pagination.next_offset);
+    p.set('revision', browse.revision);
+    const response = await fetch('/api/index?' + p, { signal: refreshController?.signal });
+    if (request !== refreshRequest) return;
+    if (response.status === 409) { await refresh(); return }
+    if (!response.ok) throw new Error('Loading failed');
+    const d = await response.json();
+    if (request !== refreshRequest) return;
+    browse.pagination = d.pagination;
+    renderFiles(d.files, true);
+  } catch (error) {
+    if (error.name !== 'AbortError') showToast('Could not load more documents. Use Load more to retry.');
+  } finally {
+    if (request === refreshRequest) { browse.loading = false; updateLoadMore() }
   }
 }
 
@@ -172,6 +260,7 @@ function renderFacet(id, items, selected, allLabel, format = value => value, onD
 }
 
 function renderTags(items) {
+  closeTagMenu();
   visibleTags = items;
   const e = $('tags'), needle = $('tagSearch').value.trim().toLowerCase();
   e.innerHTML = '';
@@ -189,64 +278,134 @@ function renderTags(items) {
     filter.append(count);
     filter.title = 'Filter by ' + i.value;
     filter.onclick = () => { state.tags.has(i.value) ? state.tags.delete(i.value) : state.tags.add(i.value); syncUrl(true); refresh() };
-    const edit = document.createElement('button');
-    edit.className = 'tag-edit';
-    edit.textContent = '✎';
-    edit.title = 'Rename ' + i.value + ' everywhere';
-    edit.setAttribute('aria-label', 'Rename ' + i.value + ' everywhere');
-    edit.onclick = () => renameTag(i.value);
-    const ignore = document.createElement('button');
-    ignore.className = 'tag-ignore';
-    ignore.textContent = '−';
-    ignore.title = 'Ignore ' + i.value + ' everywhere';
-    ignore.setAttribute('aria-label', 'Ignore ' + i.value + ' everywhere');
-    ignore.onclick = () => ignoreTag(i.value);
-    const star = document.createElement('button');
-    const favorite = favoriteTags.includes(i.value);
-    star.className = 'tag-star' + (favorite ? ' on' : '');
-    star.textContent = favorite ? '★' : '☆';
-    star.title = (favorite ? 'Remove ' : 'Add ') + i.value + (favorite ? ' from' : ' to') + ' favorite tags';
-    star.setAttribute('aria-label', star.title);
-    star.setAttribute('aria-pressed', String(favorite));
-    star.onclick = () => setFavoriteTag(i.value, !favorite);
-    wrap.append(filter, star, edit, ignore);
+    wrap.append(filter, tagMenuButton(i.value, 'sidebar'));
     e.append(wrap);
   });
   if (!e.children.length) e.innerHTML = '<div class="empty">No matching tags.</div>';
 }
+
+let tagMenuTrigger;
+function tagMenuButton(tag, source, documentFile = null) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'tag-menu-button' + (favoriteTags.includes(tag) ? ' favorite' : '');
+  button.textContent = favoriteTags.includes(tag) ? '★' : '⋯';
+  button.title = 'Actions for ' + tag;
+  button.setAttribute('aria-label', button.title);
+  button.setAttribute('aria-haspopup', 'menu');
+  button.setAttribute('aria-expanded', 'false');
+  button.dataset.tag = tag;
+  button.onclick = event => { event.stopPropagation(); openTagMenu(tag, button, source, documentFile) };
+  return button;
+}
+function closeTagMenu(restoreFocus = false) {
+  const menu = $('tagActions');
+  if (menu) menu.hidden = true;
+  tagMenuTrigger?.setAttribute('aria-expanded', 'false');
+  if (restoreFocus && tagMenuTrigger?.isConnected) tagMenuTrigger.focus({ preventScroll: true });
+  tagMenuTrigger = null;
+}
+function openTagMenu(tag, trigger, source, documentFile) {
+  if (tagMenuTrigger === trigger && !$('tagActions')?.hidden) { closeTagMenu(true); return }
+  closeTagMenu();
+  let menu = $('tagActions');
+  if (!menu) {
+    menu = document.createElement('div');
+    menu.id = 'tagActions';
+    menu.className = 'tag-actions';
+    menu.setAttribute('role', 'menu');
+    document.body.append(menu);
+  }
+  menu.replaceChildren();
+  menu.setAttribute('aria-label', 'Actions for ' + tag);
+  const action = (label, callback, danger = false) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.setAttribute('role', 'menuitem');
+    button.textContent = label;
+    if (danger) button.className = 'danger';
+    button.onclick = () => { closeTagMenu(true); callback() };
+    menu.append(button);
+  };
+  const favorite = favoriteTags.includes(tag);
+  action(favorite ? 'Remove from favorites' : 'Add to favorites', () => setFavoriteTag(tag, !favorite));
+  action('Rename everywhere…', () => renameTag(tag));
+  if (source === 'quick') {
+    const assigned = documentFile?.document_tags?.find(entry => entry.value === tag);
+    if (assigned) action('Remove from this document', () => removeDocumentTag(tag, 'all'));
+    action('Remove from quick tags', () => removeQuickTag(tag), true);
+  } else {
+    action('Ignore inferred tag everywhere', () => ignoreTag(tag), true);
+  }
+  tagMenuTrigger = trigger;
+  trigger.setAttribute('aria-expanded', 'true');
+  menu.hidden = false;
+  const rect = trigger.getBoundingClientRect();
+  const left = Math.max(8, Math.min(innerWidth - menu.offsetWidth - 8, rect.right - menu.offsetWidth));
+  const top = rect.bottom + menu.offsetHeight + 8 < innerHeight ? rect.bottom + 4 : Math.max(8, rect.top - menu.offsetHeight - 4);
+  menu.style.left = left + 'px';
+  menu.style.top = top + 'px';
+  menu.firstElementChild?.focus({ preventScroll: true });
+}
+async function removeQuickTag(tag) {
+  const response = await fetch('/api/tags/' + encodeURIComponent(tag) + '/quick', { method: 'DELETE' });
+  if (response.ok) { await refresh(); showToast('Removed from quick tags. Document tags are unchanged.') }
+  else showToast('Could not remove this quick tag.');
+}
+document.addEventListener('click', event => { if (!event.target.closest('#tagActions, .tag-menu-button')) closeTagMenu() });
+document.addEventListener('focusin', event => { if (tagMenuTrigger && !event.target.closest('#tagActions') && event.target !== tagMenuTrigger) closeTagMenu() });
+document.addEventListener('scroll', () => closeTagMenu(), true);
+document.addEventListener('keydown', event => {
+  const menu = $('tagActions');
+  if (!menu || menu.hidden) return;
+  if (event.key === 'Escape') { event.preventDefault(); closeTagMenu(true); return }
+  if (event.key === 'Tab') { closeTagMenu(); return }
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const items = [...menu.querySelectorAll('button')], current = items.indexOf(document.activeElement);
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+  items[next].focus();
+});
 
 // Duplicate copies are grouped onto their original's list entry with a count badge instead of listed separately.
 // f.duplicate_count comes from the server and is filter-independent, so it stays correct even when the
 // original (or a sibling copy) is hidden by the current year/tag/search filters.
 // Rendered as a thumbnail grid while the preview is closed and as a compact list next to the open preview.
 let renderedSignature = '';
-function renderFiles(list) {
-  files = list;
+function renderFiles(list, append = false) {
   const e = $('files');
-  // Skip identical re-renders (periodic refresh) so thumbnails and scroll position stay put.
-  const signature = JSON.stringify(list.map(f => [f.id, f.name, f.pdf_title, f.date, f.year, f.category, f.classification, f.summary, f.duplicate_count, f.thumb_url]));
-  if (signature === renderedSignature && e.childElementCount) { markActiveFile(); return }
+  files = append ? [...files, ...list] : list;
+  const signature = JSON.stringify(files.map(f => [f.id, f.name, f.title, f.date, f.year, f.category, f.classification, f.summary, f.document_tags, f.duplicate_count, f.thumb_url]));
+  const total = browse.pagination?.total ?? files.length;
+  $('resultCount').textContent = total === 1 ? '1 document' : total + ' documents';
+  if (!append && signature === renderedSignature && e.childElementCount) { markActiveFile(); return }
   renderedSignature = signature;
-  const byId = new Map(list.map(f => [f.id, f]));
-  const visible = list.filter(f => !(f.is_duplicate && f.duplicate_of && byId.has(f.duplicate_of)));
-  $('resultCount').textContent = visible.length === 1 ? '1 document' : visible.length + ' documents';
-  e.innerHTML = '';
-  if (!visible.length) { e.innerHTML = '<div class="empty">No documents match these filters.</div>'; return }
-  const groups = {};
-  visible.forEach(f => (groups[f.year || 'unknown'] ??= []).push(f));
-  Object.keys(groups).sort().reverse().forEach(y => {
-    const g = document.createElement('section');
-    g.className = 'year-group';
-    const heading = document.createElement('h3');
-    heading.innerHTML = '<span></span><span class="count"></span>';
-    heading.firstChild.textContent = y;
-    heading.lastChild.textContent = groups[y].length;
-    const items = document.createElement('div');
-    items.className = 'year-items';
-    groups[y].forEach(f => items.append(fileCard(f)));
-    g.append(heading, items);
-    e.append(g);
+  if (!append) e.replaceChildren();
+  if (!files.length) { e.innerHTML = '<div class="empty">No documents match these filters.</div>'; return }
+  const groups = new Map([...e.querySelectorAll('.year-group')].map(group => [group.dataset.year, group]));
+  const batches = new Map();
+  list.forEach(f => {
+    const year = f.year || 'unknown';
+    let group = groups.get(year);
+    if (!group) {
+      group = document.createElement('section');
+      group.className = 'year-group';
+      group.dataset.year = year;
+      const heading = document.createElement('h3');
+      heading.innerHTML = '<span></span><span class="count"></span>';
+      heading.firstChild.textContent = year;
+      heading.lastChild.textContent = browse.pagination?.year_counts[year] ?? '';
+      const items = document.createElement('div');
+      items.className = 'year-items';
+      group.append(heading, items);
+      e.insertBefore(group, $('loadMore'));
+      groups.set(year, group);
+    }
+    if (!batches.has(year)) batches.set(year, document.createDocumentFragment());
+    batches.get(year).append(fileCard(f));
   });
+  batches.forEach((fragment, year) => groups.get(year).querySelector('.year-items').append(fragment));
+  updateLoadMore();
 }
 
 function fileCard(f) {
@@ -257,7 +416,7 @@ function fileCard(f) {
   b.draggable = true;
   b.className = 'file' + (state.selected?.id === f.id ? ' active' : '') + (multi.has(f.id) ? ' multi' : '');
   b.dataset.fileId = f.id;
-  b.innerHTML = '<div class="thumb"><span class="type-label"></span></div><div class="body"><div class="title"></div><div class="meta"></div><div class="summary"></div></div>';
+  b.innerHTML = '<div class="thumb"><span class="type-label"></span></div><div class="body"><div class="meta"><span class="card-category"></span><span class="card-date"></span></div><div class="title"></div><div class="summary"></div><div class="card-tags"></div></div>';
   b.querySelector('.type-label').textContent = f.type || 'file';
   if (f.thumb_url) {
     const img = document.createElement('img');
@@ -270,10 +429,31 @@ function fileCard(f) {
     if (img.complete && img.naturalWidth) img.classList.add('loaded');
     b.querySelector('.thumb').prepend(img);
   }
-  b.querySelector('.title').textContent = f.pdf_title || f.name;
-  b.title = f.name;
-  b.querySelector('.meta').textContent = [f.date || 'no date', f.category || f.classification].filter(Boolean).join(' · ');
-  b.querySelector('.summary').textContent = f.summary || '';
+  b.querySelector('.title').textContent = f.title || f.name;
+  b.title = (f.title || f.name) + '\nFile: ' + f.name;
+  const category = b.querySelector('.card-category');
+  category.textContent = (f.category || f.classification || '').replace(/-/g, ' ');
+  category.hidden = !category.textContent;
+  b.querySelector('.card-date').textContent = f.date || 'No date';
+  const summary = b.querySelector('.summary');
+  summary.textContent = f.summary || '';
+  summary.hidden = !f.summary || f.summary.trim() === f.title;
+  const tags = [...(f.document_tags || [])].sort((a, b) => (a.kind !== 'custom') - (b.kind !== 'custom'));
+  const tagList = b.querySelector('.card-tags');
+  tags.slice(0, 3).forEach(tag => {
+    const chip = document.createElement('span');
+    chip.className = 'card-tag' + (tag.kind === 'custom' ? ' custom' : '');
+    chip.textContent = '#' + tag.value;
+    tagList.append(chip);
+  });
+  if (tags.length > 3) {
+    const more = document.createElement('span');
+    more.className = 'card-tag-more';
+    more.textContent = '+' + (tags.length - 3);
+    more.title = tags.slice(3).map(tag => tag.value).join(', ');
+    tagList.append(more);
+  }
+  tagList.hidden = !tags.length;
   if (dupeCount) {
     const badge = document.createElement('span');
     badge.className = 'dupe-badge';
@@ -371,11 +551,12 @@ async function bulkUpdate(ids, change, label) {
 
 async function setFavoriteTag(tag, favorite) {
   const r = await fetch('/api/tags/' + encodeURIComponent(tag) + '/favorite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ favorite }) });
-  if (r.ok) refresh();
+  if (r.ok) await refresh();
 }
 
 // Favorites first, then the most recently assigned tags; clicking one adds it to the open document (or the whole multi-selection).
 function renderQuickTags(f) {
+  closeTagMenu();
   const e = $('quickTags'), assigned = new Set((f.document_tags || []).map(entry => entry.value));
   const targets = multi.size > 1 ? [...multi] : [f.id];
   e.innerHTML = '';
@@ -397,7 +578,10 @@ function renderQuickTags(f) {
       b.disabled = done;
       b.title = done ? 'Already on this document' : 'Add ' + tag + (targets.length > 1 ? ' to ' + targets.length + ' documents' : ' to this document');
       b.onclick = () => bulkUpdate(targets, { tag }, '#' + tag);
-      group.append(b);
+      const chip = document.createElement('span');
+      chip.className = 'quick-tag-wrap';
+      chip.append(b, tagMenuButton(tag, 'quick', f));
+      group.append(chip);
     });
     e.append(group);
   });
@@ -420,17 +604,28 @@ function openFile(f) {
 }
 
 // Arrow keys move through the list; in the grid they also move by row/column using the cards' on-screen positions.
-function selectAdjacentFile(key) {
+async function selectAdjacentFile(key) {
   const cards = [...document.querySelectorAll('#files .file')];
   if (!cards.length) return;
   const current = cards.findIndex(card => card.dataset.fileId === state.selected?.id);
+  const forward = ['arrowdown', 'arrowright'].includes(key);
+  if (current === cards.length - 1 && forward && browse.pagination?.next_offset != null) {
+    await loadMore();
+    if (document.querySelectorAll('#files .file').length > cards.length) return selectAdjacentFile(key);
+  }
   let next;
   if (current < 0) next = ['arrowup', 'arrowleft'].includes(key) ? cards.length - 1 : 0;
   else if (state.preview || key === 'arrowleft' || key === 'arrowright') next = Math.max(0, Math.min(cards.length - 1, current + (['arrowdown', 'arrowright'].includes(key) ? 1 : -1)));
   else {
     const from = cards[current].getBoundingClientRect(), down = key === 'arrowdown';
     const candidates = cards.map((card, index) => ({ index, rect: card.getBoundingClientRect() })).filter(({ rect }) => down ? rect.top > from.top + 4 : rect.top < from.top - 4);
-    if (!candidates.length) return;
+    if (!candidates.length) {
+      if (down && browse.pagination?.next_offset != null) {
+        await loadMore();
+        if (document.querySelectorAll('#files .file').length > cards.length) return selectAdjacentFile(key);
+      }
+      return;
+    }
     const rowTop = down ? Math.min(...candidates.map(c => c.rect.top)) : Math.max(...candidates.map(c => c.rect.top));
     next = candidates.filter(c => Math.abs(c.rect.top - rowTop) < 4).sort((a, b) => Math.abs(a.rect.left - from.left) - Math.abs(b.rect.left - from.left))[0].index;
   }
@@ -501,8 +696,9 @@ function selectFile(f, load = true, updateUrl = true) {
   $('openOriginal').href = f.url;
   $('runOcr').hidden = !isPdf;
   $('allPages').closest('label').hidden = !isPdf;
-  $('documentTitle').textContent = f.pdf_title || f.name;
-  $('documentMeta').textContent = [f.name, f.pdf_author, f.date, f.category, f.classification, f.is_duplicate ? 'Duplicate content' : ''].filter(Boolean).join(' · ');
+  $('documentTitle').textContent = f.title || f.name;
+  $('documentMeta').textContent = [f.date, (f.category || f.classification || '').replace(/-/g, ' '), f.pdf_author, f.type?.toUpperCase(), f.is_duplicate ? 'Duplicate content' : ''].filter(Boolean).join(' · ');
+  $('documentMeta').title = 'File: ' + f.name;
   const ruleBadge = $('ruleMatchBadge');
   if (f.rule_name) {
     ruleBadge.hidden = false;
@@ -515,6 +711,8 @@ function selectFile(f, load = true, updateUrl = true) {
   }
   if (!sameDocument) { $('tagInput').value = ''; hideTagSuggestions() }
   $('filenameInput').value = f.name;
+  $('titleInput').value = f.display_title || '';
+  $('titleInput').placeholder = f.title || 'Give this document a useful name';
   $('summaryInput').value = f.summary || '';
   const ys = [...new Set([...availableYears, f.year])].sort().reverse();
   $('yearInput').innerHTML = ys.map(y => '<option value="' + y + '">' + y + '</option>').join('');
@@ -535,9 +733,13 @@ function selectFile(f, load = true, updateUrl = true) {
 
 async function saveDetails() {
   if (!state.selected) return;
-  const r = await fetch('/api/file/' + encodeURIComponent(state.selected.id), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: $('documentTitle').textContent.trim(), summary: $('summaryInput').value, year: $('yearInput').value, filename: $('filenameInput').value }) });
-  $('editorStatus').textContent = r.ok ? 'Saved.' : 'Could not save details.';
-  if (r.ok) refresh();
+  const id = state.selected.id;
+  const change = { display_title: $('titleInput').value, summary: $('summaryInput').value };
+  if ($('filenameInput').value !== state.selected.name) change.filename = $('filenameInput').value;
+  if ($('yearInput').value !== state.selected.year) change.year = $('yearInput').value;
+  const r = await fetch('/api/file/' + encodeURIComponent(id), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(change) });
+  if (r.ok) await refresh();
+  if (state.selected?.id === id) $('editorStatus').textContent = r.ok ? 'Saved.' : 'Could not save details.';
 }
 
 async function moveDocumentYear() {
@@ -687,21 +889,29 @@ async function removeDocumentTag(tag, kind) {
   else $('editorStatus').textContent = 'Could not remove tag.';
 }
 
+let metadataController;
 async function loadMetadata(id) {
-  const r = await fetch('/api/file/' + encodeURIComponent(id) + '/details');
-  if (!r.ok || state.selected?.id !== id) return;
-  const d = await r.json();
-  $('ocrText').value = d.ocr_text || '';
-  const values = $('metaValues');
-  values.innerHTML = '';
-  if (d.full_path) { const path = document.createElement('span'); path.className = 'full-path'; path.textContent = 'Path: ' + d.full_path; values.append(path) }
-  if (d.rule_name) {
-    const chip = document.createElement('span');
-    chip.className = 'rule-chip';
-    chip.textContent = 'Matched rule: ' + d.rule_name + (d.rule_reason ? ' — ' + d.rule_reason : '');
-    values.append(chip);
+  metadataController?.abort();
+  const controller = metadataController = new AbortController();
+  try {
+    const r = await fetch('/api/file/' + encodeURIComponent(id) + '/details', { signal: controller.signal });
+    if (!r.ok || state.selected?.id !== id) return;
+    const d = await r.json();
+    if (controller.signal.aborted || state.selected?.id !== id) return;
+    $('ocrText').value = d.ocr_text || '';
+    const values = $('metaValues');
+    values.innerHTML = '';
+    if (d.full_path) { const path = document.createElement('span'); path.className = 'full-path'; path.textContent = 'Path: ' + d.full_path; values.append(path) }
+    if (d.rule_name) {
+      const chip = document.createElement('span');
+      chip.className = 'rule-chip';
+      chip.textContent = 'Matched rule: ' + d.rule_name + (d.rule_reason ? ' — ' + d.rule_reason : '');
+      values.append(chip);
+    }
+    Object.entries(d.metadata || {}).forEach(([key, value]) => { const chip = document.createElement('span'); chip.textContent = key + ': ' + value; values.append(chip) });
+  } catch (error) {
+    if (error.name !== 'AbortError') $('editorStatus').textContent = 'Could not load document details.';
   }
-  Object.entries(d.metadata || {}).forEach(([key, value]) => { const chip = document.createElement('span'); chip.textContent = key + ': ' + value; values.append(chip) });
 }
 
 async function saveOcr() {
@@ -1255,7 +1465,7 @@ $('tagInput').onkeydown = e => {
     loadTagSuggestions();
   } else if (e.key === 'Escape' && open) { e.preventDefault(); e.stopPropagation(); hideTagSuggestions() }
 };
-$('documentTitle').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur() } };
+$('titleInput').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); saveDetails() } };
 $('duplicates').onchange = e => { state.duplicates = e.target.checked; $('cleanDuplicatesButton').hidden = !state.duplicates; syncUrl(true); refresh() };
 $('resetFilters').onclick = () => {
   state.q = ''; state.years = new Set(); state.categories = new Set(); state.types = new Set(); state.tags = new Set(); state.duplicates = false;
@@ -1373,6 +1583,18 @@ document.addEventListener('keydown', event => {
   }
   if (event.ctrlKey || event.metaKey || event.altKey) return;
   const typing = event.target.closest('input, textarea, select, [contenteditable="true"]');
+  const facet = event.target.closest('.facet-list');
+  if (facet && !typing && ['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'home', 'end'].includes(key)) {
+    const items = [...facet.querySelectorAll('.facet-item:not(:disabled)')];
+    const current = items.indexOf(event.target.closest('.facet-item'));
+    if (current < 0) return;
+    event.preventDefault();
+    const step = ['arrowup', 'arrowleft'].includes(key) ? -1 : 1;
+    const next = key === 'home' ? 0 : key === 'end' ? items.length - 1 : Math.max(0, Math.min(items.length - 1, current + step));
+    items[next].focus({ preventScroll: true });
+    items[next].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    return;
+  }
   if (key === 'escape' && !typing) {
     if (multi.size) { clearMulti(); return }
     if (isNarrow() && !root.classList.contains('sidebar-closed')) setSidebar(false);
@@ -1412,10 +1634,19 @@ document.querySelectorAll('.settings-tab').forEach(button => button.onclick = ()
   handle.addEventListener('dblclick', () => { root.style.removeProperty('--list-w'); store.set(LIST_WIDTH_KEY, '') });
 })();
 
+$('files').addEventListener('scroll', () => {
+  const e = $('files');
+  if (e.scrollHeight - e.scrollTop - e.clientHeight < 500) loadMore();
+}, { passive: true });
+
 $('sidebarToggle').setAttribute('aria-expanded', String(!root.classList.contains('sidebar-closed')));
 restoreUrlState();
 refresh();
 refreshStatus();
 checkFirstRunSetup();
 window.addEventListener('popstate', () => { restoreUrlState(); refresh() });
-setInterval(() => { if (!dragging) refresh(); refreshStatus() }, 15000);
+setInterval(() => {
+  if (document.hidden) return;
+  if (!dragging && !document.activeElement?.closest('input, textarea, select, [contenteditable="true"]')) refresh({ background: true });
+  refreshStatus();
+}, 15000);
